@@ -1,0 +1,49 @@
+import "vite-plus/test/config";
+import { defineConfig } from "vite-plus";
+
+import webPackageJson from "../web/package.json" with { type: "json" };
+
+// VS Code provides `vscode` at runtime; everything else, including the
+// workspace packages and Effect, is inlined into one CommonJS file.
+const isVscodeModule = (id: string) => id === "vscode";
+
+export default defineConfig({
+  run: {
+    tasks: {
+      build: {
+        command: "vp pack && node scripts/copy-web.ts",
+        dependsOn: ["@t3tools/web#build:vscode"],
+        cache: false,
+      },
+      package: {
+        command: "npx --yes @vscode/vsce@4.0.0 package --no-dependencies",
+        dependsOn: ["build"],
+        cache: false,
+      },
+    },
+  },
+  pack: {
+    format: "cjs",
+    platform: "node",
+    target: "node20",
+    outDir: "dist",
+    dts: false,
+    sourcemap: true,
+    minify: true,
+    clean: false,
+    outExtensions: () => ({ js: ".cjs" }),
+    outputOptions: { codeSplitting: false },
+    entry: ["src/extension.ts"],
+    define: {
+      __T3CODE_WEB_VERSION__: JSON.stringify(webPackageJson.version),
+    },
+    deps: {
+      alwaysBundle: (id) => !id.startsWith("node:") && !isVscodeModule(id),
+      neverBundle: isVscodeModule,
+      onlyBundle: false,
+    },
+  },
+  test: {
+    setupFiles: ["../../packages/shared/src/testing/longTempDir.ts"],
+  },
+});
