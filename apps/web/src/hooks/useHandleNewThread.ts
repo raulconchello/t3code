@@ -33,6 +33,7 @@ import { readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
+import { readWorkspaceLock, resolveLockedNewThreadProjectRef } from "../workspaceLock";
 import { useClientSettings } from "./useSettings";
 
 interface NewThreadWorkspaceOptions {
@@ -65,7 +66,7 @@ export function useNewThreadHandler() {
 
   return useCallback(
     (
-      projectRef: ScopedProjectRef,
+      requestedProjectRef: ScopedProjectRef,
       options?: {
         branch?: string | null;
         worktreePath?: string | null;
@@ -78,6 +79,16 @@ export function useNewThreadHandler() {
       // up again and finding whichever draft it happens to hold.
     ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
       const projects = readProjects();
+      // Under a workspace lock every entry point (buttons, keybindings, the
+      // palette, the landing page) starts threads in the locked project.
+      const workspaceLock = readWorkspaceLock();
+      const projectRef =
+        workspaceLock === null
+          ? requestedProjectRef
+          : resolveLockedNewThreadProjectRef(requestedProjectRef, workspaceLock, projects);
+      if (projectRef === null) {
+        return Promise.resolve(null);
+      }
       const targetServerSettings =
         environmentServerConfigs.get(projectRef.environmentId)?.settings ?? DEFAULT_SERVER_SETTINGS;
       const {

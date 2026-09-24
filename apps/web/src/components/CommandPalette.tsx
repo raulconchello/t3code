@@ -74,6 +74,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useWorkspaceLock } from "../hooks/useWorkspaceLock";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { useClientSettings } from "../hooks/useSettings";
@@ -468,6 +469,14 @@ function overlayModeForCommand(command: string | null): SearchOverlayMode | null
     : null;
 }
 
+/** Actions that add projects or span every project, hidden under a workspace lock. */
+const WORKSPACE_LOCKED_ACTION_VALUES: ReadonlySet<string> = new Set([
+  "action:add-project",
+  "action:add-project:wsl-folder",
+  "action:pull-requests",
+  "action:usage",
+]);
+
 export function CommandPalette({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reduceCommandPaletteUiState, {
     open: false,
@@ -479,7 +488,11 @@ export function CommandPalette({ children }: { children: ReactNode }) {
     (mode: SearchOverlayMode) => dispatch({ _tag: "ToggleMode", mode }),
     [],
   );
-  const openAddProject = useCallback(() => dispatch({ _tag: "OpenAddProject" }), []);
+  // Under a workspace lock no other project can be added, whoever asks.
+  const workspaceLocked = useWorkspaceLock() !== null;
+  const openAddProject = useCallback(() => {
+    if (!workspaceLocked) dispatch({ _tag: "OpenAddProject" });
+  }, [workspaceLocked]);
   const openNewThreadIn = useCallback(() => dispatch({ _tag: "OpenNewThreadIn" }), []);
   const clearOpenIntent = useCallback(() => dispatch({ _tag: "ClearOpenIntent" }), []);
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -717,6 +730,8 @@ function OpenCommandPaletteDialog(props: {
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
+  // A workspace lock hides the actions that add projects or span every project.
+  const workspaceLocked = useWorkspaceLock() !== null;
   const projects = useProjects();
   const referenceThreadRef =
     pathname === "/pull-requests"
@@ -1048,9 +1063,16 @@ function OpenCommandPaletteDialog(props: {
       getFilesystemBrowsePath(
         query,
         browseEnvironmentPlatform,
-        browseEnvironmentId !== null && !isRemoteProjectRepositoryStep,
+        // Typing a path browses folders to add as projects.
+        browseEnvironmentId !== null && !isRemoteProjectRepositoryStep && !workspaceLocked,
       ),
-    [browseEnvironmentId, browseEnvironmentPlatform, isRemoteProjectRepositoryStep, query],
+    [
+      browseEnvironmentId,
+      browseEnvironmentPlatform,
+      isRemoteProjectRepositoryStep,
+      query,
+      workspaceLocked,
+    ],
   );
   const isBrowsing = browsePath.isBrowsing;
   const browseDirectoryPath = browsePath.directoryPath;
@@ -2077,7 +2099,12 @@ function OpenCommandPaletteDialog(props: {
     });
   }
 
-  const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
+  const rootGroups = buildRootGroups({
+    actionItems: workspaceLocked
+      ? actionItems.filter((item) => !WORKSPACE_LOCKED_ACTION_VALUES.has(item.value))
+      : actionItems,
+    recentThreadItems,
+  });
   const settingsSearchItems: CommandPaletteActionItem[] = searchSettings(
     deferredQuery,
     availableSettingsSearchItems,

@@ -121,6 +121,7 @@ import {
 } from "../threadSelectionStore";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useWorkspaceLock } from "../hooks/useWorkspaceLock";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useClientSettings } from "../hooks/useSettings";
@@ -2354,7 +2355,12 @@ export default function Sidebar() {
   // The selection lives in the persisted UI store next to the other sidebar
   // project preferences, so routes that unmount the sidebar (Settings) and
   // app restarts keep it.
-  const projectScopeKey = useUiStateStore((store) => store.sidebarProjectScopeKey);
+  // Under a workspace lock every listed project is the workspace's own: the
+  // scope is fixed to it and the stored preference is never read or written.
+  const workspaceLock = useWorkspaceLock();
+  const storedProjectScopeKey = useUiStateStore((store) => store.sidebarProjectScopeKey);
+  const projectScopeKey =
+    workspaceLock === null ? storedProjectScopeKey : (projectGroups[0]?.projectKey ?? null);
   const setProjectScopeKey = useUiStateStore((store) => store.setSidebarProjectScopeKey);
   // {value, label} items let Base UI drive the combobox selection contract
   // while the popup search filters the same collection.
@@ -2413,26 +2419,43 @@ export default function Sidebar() {
         : (projectGroups.find((project) => project.projectKey === projectScopeKey) ?? null),
     [projectGroups, projectScopeKey],
   );
+  const lockedEnvironmentId = workspaceLock?.lock.environmentId ?? null;
+  const lockedProjectIds = workspaceLock?.projectIds ?? null;
   const scopedProjectKeys = useMemo(
     () =>
-      scopedProjectGroup === null
-        ? null
-        : new Set(
-            scopedProjectGroup.memberProjectRefs.map(
-              (projectRef) => `${projectRef.environmentId}:${projectRef.projectId}`,
+      lockedEnvironmentId !== null
+        ? new Set(
+            [...(lockedProjectIds ?? [])].map((projectId) => `${lockedEnvironmentId}:${projectId}`),
+          )
+        : scopedProjectGroup === null
+          ? null
+          : new Set(
+              scopedProjectGroup.memberProjectRefs.map(
+                (projectRef) => `${projectRef.environmentId}:${projectRef.projectId}`,
+              ),
             ),
-          ),
-    [scopedProjectGroup],
+    [lockedEnvironmentId, lockedProjectIds, scopedProjectGroup],
   );
   // A persisted scope whose project is gone falls back to all projects, but
   // only after every catalog environment has a live project snapshot. Cached
   // or disconnected environments cannot establish that the project is gone.
   const allProjectSnapshotsReady = useAllEnvironmentProjectSnapshotsReady();
   useEffect(() => {
-    if (projectScopeKey !== null && allProjectSnapshotsReady && scopedProjectGroup === null) {
+    if (
+      workspaceLock === null &&
+      projectScopeKey !== null &&
+      allProjectSnapshotsReady &&
+      scopedProjectGroup === null
+    ) {
       setProjectScopeKey(null);
     }
-  }, [allProjectSnapshotsReady, projectScopeKey, scopedProjectGroup, setProjectScopeKey]);
+  }, [
+    allProjectSnapshotsReady,
+    projectScopeKey,
+    scopedProjectGroup,
+    setProjectScopeKey,
+    workspaceLock,
+  ]);
   // Count-only subscription: the parent needs "are there draft rows" for the
   // empty state, while SidebarDraftBlock owns the per-keystroke content
   // subscription. Selecting a number keeps typing in a draft composer from
@@ -4041,12 +4064,13 @@ export default function Sidebar() {
           api.contextMenu.show(
             buildThreadActionMenuItems({
               branch: thread.branch ?? null,
-              projectFilter: threadProjectGroup
-                ? {
-                    label: threadProjectGroup.displayName,
-                    isActive: projectScopeKey === threadProjectGroup.projectKey,
-                  }
-                : null,
+              projectFilter:
+                threadProjectGroup && workspaceLock === null
+                  ? {
+                      label: threadProjectGroup.displayName,
+                      isActive: projectScopeKey === threadProjectGroup.projectKey,
+                    }
+                  : null,
               isPinned,
               isSettled,
               isSnoozed,
@@ -4256,6 +4280,7 @@ export default function Sidebar() {
       startThreadRename,
       updateThreadMetadata,
       timestampFormat,
+      workspaceLock,
     ],
   );
 
@@ -4383,7 +4408,8 @@ export default function Sidebar() {
           <SidebarGroup className="z-[1]">
             <SidebarThreadHeader
               searchFieldRef={headerSearchRef}
-              hasProjects={projectGroups.length > 0}
+              // Under a workspace lock there is nothing to scope and no project to add.
+              hasProjects={workspaceLock === null && projectGroups.length > 0}
               projectScope={
                 <Combobox
                   items={projectScopeItems}
@@ -4906,7 +4932,7 @@ export default function Sidebar() {
             settledThreads.length ===
             0 ? (
             <div className="flex flex-col items-center gap-2 px-2 py-6 text-center text-xs text-muted-foreground/60">
-              {projects.length === 0 ? (
+              {projects.length === 0 && workspaceLock === null ? (
                 <>
                   <span>No projects yet</span>
                   <button

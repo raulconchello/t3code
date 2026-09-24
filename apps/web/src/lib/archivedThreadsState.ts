@@ -5,10 +5,12 @@ import {
   makeArchivedThreadsEnvironmentKey,
 } from "@t3tools/client-runtime/state/threads";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { useCallback, useMemo } from "react";
 
 import { orchestrationEnvironment } from "../state/orchestration";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { lockShellSnapshot, readWorkspaceLock, type WorkspaceLock } from "../workspaceLock";
 
 function archivedSnapshotAtom(environmentId: EnvironmentId) {
   return orchestrationEnvironment.archivedShellSnapshot({
@@ -17,8 +19,21 @@ function archivedSnapshotAtom(environmentId: EnvironmentId) {
   });
 }
 
+// Archived threads outside the workspace lock stay hidden, like live ones.
+function lockArchivedSnapshotAtoms(lock: WorkspaceLock) {
+  return Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) =>
+      AsyncResult.map(get(archivedSnapshotAtom(environmentId)), (snapshot) =>
+        lockShellSnapshot(snapshot, environmentId, lock),
+      ),
+    ).pipe(Atom.withLabel(`web:archived-thread-snapshot-locked:${environmentId}`)),
+  );
+}
+
+const workspaceLock = readWorkspaceLock();
 const archivedSnapshotsAtom = createArchivedThreadSnapshotsAtomFamily({
-  getSnapshotAtom: archivedSnapshotAtom,
+  getSnapshotAtom:
+    workspaceLock === null ? archivedSnapshotAtom : lockArchivedSnapshotAtoms(workspaceLock),
   labelPrefix: "web:archived-thread-snapshots",
 });
 

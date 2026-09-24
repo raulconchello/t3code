@@ -16,6 +16,7 @@ import { useCallback, useEffect, useRef } from "react";
 
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useRemoveClonedProject } from "../hooks/useRemoveClonedProject";
+import { useWorkspaceLock } from "../hooks/useWorkspaceLock";
 import { useEnvironments } from "../state/environments";
 import { useEnvironmentProjectClones } from "../state/projectClones";
 import { sourceControlEnvironment } from "../state/sourceControl";
@@ -32,6 +33,9 @@ import { stackedThreadToast } from "./ui/toastHelpers";
  */
 export function ProjectCloneToastCoordinator() {
   const { environments } = useEnvironments();
+  // Clones add other projects, which a workspace lock never shows.
+  const workspaceLocked = useWorkspaceLock() !== null;
+  if (workspaceLocked) return null;
   return environments.map((environment) => (
     <EnvironmentCloneToasts
       key={environment.environmentId}

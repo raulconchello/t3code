@@ -8,6 +8,7 @@ import { desktopWslStateAtom } from "~/state/desktopWslState";
 import { useEnvironments } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { usePrimarySessionState } from "~/environments/primary";
+import { useWorkspaceLock } from "~/hooks/useWorkspaceLock";
 import { isWslSettingsRowVisible } from "./ConnectionsSettings.logic";
 import { isProviderSettingsEnvironmentAvailable } from "./ProviderSettingsPanel.logic";
 import {
@@ -19,6 +20,8 @@ export function useAvailableSettingsSearchItems() {
   const { environments } = useEnvironments();
   const primarySessionState = usePrimarySessionState();
   const localEnvironmentDisabled = isLocalEnvironmentDisabled();
+  // Connections manage every environment, so a workspace lock leaves them out.
+  const workspaceLocked = useWorkspaceLock() !== null;
   const desktopWsl = useEnvironmentQuery(
     isElectron && !localEnvironmentDisabled ? desktopWslStateAtom : null,
   );
@@ -32,6 +35,7 @@ export function useAvailableSettingsSearchItems() {
   return useMemo(
     () =>
       filterAvailableSettingsSearchItems({
+        workspaceLocked,
         localEnvironmentDisabled,
         hasCloudPublicConfig: hasCloudPublicConfig(),
         hasEnvironment: environments.some((environment) => environment.serverConfig !== null),
@@ -55,6 +59,7 @@ export function useAvailableSettingsSearchItems() {
       desktopWsl.error,
       environments,
       localEnvironmentDisabled,
+      workspaceLocked,
     ],
   );
 }

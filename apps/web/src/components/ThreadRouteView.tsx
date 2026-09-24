@@ -13,6 +13,7 @@ import {
   useBackgroundDraftSubmissionPending,
   useComposerDraftStore,
 } from "../composerDraftStore";
+import { useWorkspaceLock } from "../hooks/useWorkspaceLock";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import {
   useEnvironmentThreadRefs,
@@ -30,6 +31,7 @@ import {
   type ThreadRouteTarget,
 } from "../threadRoutes";
 import { resolveThreadSyncPhase } from "../threadSync";
+import { isThreadRouteOutsideLock } from "../workspaceLock";
 
 /**
  * The single chat surface behind both `/draft/$draftId` and
@@ -122,6 +124,30 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   });
   const serverThreadStarted = threadHasStarted(serverThreadDetail);
   const environmentHasAnyThreads = environmentThreadRefs.length > 0 || environmentHasDraftThreads;
+  // The thread details are not filtered by the workspace lock, so a thread or
+  // draft outside it is sent home before it can render.
+  const workspaceLock = useWorkspaceLock();
+  const outsideWorkspaceLock =
+    workspaceLock !== null &&
+    isThreadRouteOutsideLock({
+      lock: workspaceLock.lock,
+      environmentId:
+        target.kind === "server"
+          ? target.threadRef.environmentId
+          : (draftSession?.environmentId ?? null),
+      projectId:
+        target.kind === "server"
+          ? (serverThreadShell?.projectId ??
+            serverThreadDetail?.projectId ??
+            draftThread?.projectId ??
+            null)
+          : (draftSession?.projectId ?? null),
+      lockedProjectIds: workspaceLock.projectIds,
+    });
+
+  useEffect(() => {
+    if (outsideWorkspaceLock) void navigate({ to: "/", replace: true });
+  }, [navigate, outsideWorkspaceLock]);
 
   useEffect(() => {
     if (!inferredThreadRef || draftSession?.promotedTo) {
@@ -181,7 +207,9 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   }, [draftThread, serverThreadStarted, target]);
 
   let view: React.ReactNode = null;
-  if (target.kind === "draft") {
+  if (outsideWorkspaceLock) {
+    view = null;
+  } else if (target.kind === "draft") {
     if (draftSession) {
       view = (
         <ChatView

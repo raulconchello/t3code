@@ -14,17 +14,29 @@ import { SidebarInset } from "../components/ui/sidebar";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import {
+  requestWorkspaceProject,
+  useWorkspaceLock,
+  type WorkspaceLockView,
+} from "../hooks/useWorkspaceLock";
+import {
   useAllEnvironmentShellsBootstrapped,
   useProjects,
   useThreadShells,
 } from "../state/entities";
-import { useEnvironments } from "../state/environments";
+import { useEnvironment, useEnvironments } from "../state/environments";
 import { APP_DISPLAY_NAME } from "~/branding";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 
 function ChatIndexRouteView() {
   const { authGateState } = Route.useRouteContext();
   const { environments, isReady } = useEnvironments();
+  const workspaceLock = useWorkspaceLock();
+
+  // Under a workspace lock the only project is the workspace's own, so there
+  // is no onboarding or project picker to fall back to.
+  if (workspaceLock !== null && workspaceLock.projectRef === null) {
+    return <WorkspaceLockLandingState workspaceLock={workspaceLock} />;
+  }
 
   if (authGateState.status === "hosted-static") {
     if (!isReady) return null;
@@ -103,6 +115,61 @@ function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
               Try again
             </Button>
           </div>
+        </EmptyHeader>
+      </Empty>
+    </SidebarInset>
+  );
+}
+
+function WorkspaceLockLandingState({
+  workspaceLock,
+}: {
+  readonly workspaceLock: WorkspaceLockView;
+}) {
+  const { lock, status } = workspaceLock;
+  const connected = useEnvironment(lock.environmentId)?.connection.phase === "connected";
+  const view = (() => {
+    switch (status.phase) {
+      case "auth-failed":
+        return { title: "Signing in to T3 Code again…", description: status.message };
+      case "error":
+        return {
+          title: `Couldn’t open ${lock.label}`,
+          description: status.message,
+          action: {
+            label: "Try again",
+            // A connection error needs a fresh connection; a project error a new attempt.
+            run: connected ? requestWorkspaceProject : () => window.location.reload(),
+          },
+        };
+      case "project-missing":
+        return {
+          title: `${lock.label} is no longer a project`,
+          description: "It was removed from T3 Code.",
+          action: { label: "Re-add project", run: requestWorkspaceProject },
+        };
+      case "connecting":
+      case "preparing-project":
+      case "ready":
+        return { title: `Preparing ${lock.label}…` };
+    }
+  })();
+
+  return (
+    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
+      <Empty className="flex-1">
+        <EmptyHeader className="max-w-md">
+          <EmptyTitle>{view.title}</EmptyTitle>
+          {"description" in view && view.description ? (
+            <EmptyDescription>{view.description}</EmptyDescription>
+          ) : null}
+          {"action" in view ? (
+            <div className="mt-5 flex justify-center">
+              <Button size="sm" onClick={view.action.run}>
+                {view.action.label}
+              </Button>
+            </div>
+          ) : null}
         </EmptyHeader>
       </Empty>
     </SidebarInset>
