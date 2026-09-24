@@ -143,6 +143,34 @@ describe("writeTextToClipboard", () => {
     expect(execCommand).not.toHaveBeenCalled();
   });
 
+  it("falls back to the copy command when the Clipboard API denies the write", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("Write permission denied."));
+    const execCommand = vi.fn(() => true);
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.stubGlobal("document", {
+      activeElement: null,
+      body: { appendChild: vi.fn() },
+      createElement: vi.fn(() => ({
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        focus: vi.fn(),
+        remove: vi.fn(),
+        select: vi.fn(),
+        setAttribute: vi.fn(),
+        setSelectionRange: vi.fn(),
+        style: {},
+        value: "",
+      })),
+      execCommand,
+    });
+
+    await expect(writeTextToClipboard("thread id", "thread ID")).resolves.toBe(true);
+
+    expect(writeText).toHaveBeenCalledWith("thread id");
+    expect(execCommand).toHaveBeenCalledWith("copy");
+  });
+
   it("preserves the exact clipboard failure without exposing copied contents", async () => {
     const cause = new Error("browser clipboard failure");
     const writeText = vi.fn().mockRejectedValue(cause);

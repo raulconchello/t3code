@@ -169,6 +169,8 @@ export async function writeTextToClipboard(
     await navigator.clipboard.writeText(value);
     return true;
   } catch (cause) {
+    // Some hosts expose the Clipboard API but deny it, like VS Code for the page in its webview.
+    if (writeTextWithExecCommand(value, extraFlavors)) return true;
     throw new ClipboardWriteError({
       target,
       cause,
