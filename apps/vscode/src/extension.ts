@@ -376,6 +376,9 @@ class T3CodeController implements vscode.Disposable {
         if (url !== null) await vscode.env.openExternal(vscode.Uri.parse(url, true));
         return;
       }
+      case "t3code/keydown":
+        // The webview page replays shortcuts itself (see renderAppHtml).
+        return;
     }
   }
 

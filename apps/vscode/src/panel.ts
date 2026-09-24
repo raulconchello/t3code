@@ -89,9 +89,12 @@ ${input.script}
 /**
  * The app page: a full-size iframe on the local static server plus a relay.
  * Frame messages are forwarded only from that iframe and its exact origin;
- * extension messages are forwarded only to that origin.
+ * extension messages are forwarded only to that origin. A shortcut the app
+ * passes on (`t3code/keydown`) is replayed as a keydown on this page instead:
+ * VS Code's webview forwards this page's keydowns to the workbench, which runs
+ * the matching keybinding. Only shortcuts are replayed, never plain typing.
  */
-function renderAppHtml(input: {
+export function renderAppHtml(input: {
   readonly nonce: string;
   readonly appOrigin: string;
   readonly state: PanelState;
@@ -105,10 +108,31 @@ function renderAppHtml(input: {
   const appOrigin = ${scriptJson(input.appOrigin)};
   const frame = document.getElementById("app");
   vscode.setState(${scriptJson(input.state)});
+  const replayShortcut = (data) => {
+    const key = String(data.key);
+    const modified = data.ctrlKey === true || data.metaKey === true;
+    if (!modified && !/^F(?:[1-9]|1[0-2])$/.test(key)) return;
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key,
+      code: String(data.code),
+      keyCode: Number(data.keyCode) || 0,
+      altKey: data.altKey === true,
+      ctrlKey: data.ctrlKey === true,
+      metaKey: data.metaKey === true,
+      shiftKey: data.shiftKey === true,
+      repeat: data.repeat === true,
+      bubbles: true,
+      cancelable: true,
+    }));
+  };
   window.addEventListener("message", (event) => {
     if (event.source === frame.contentWindow) {
-      if (event.origin === appOrigin) {
-        vscode.postMessage({ kind: "t3code-host/from-frame", message: event.data });
+      if (event.origin !== appOrigin) return;
+      const data = event.data;
+      if (data && data.version === 1 && data.type === "t3code/keydown") {
+        replayShortcut(data);
+      } else {
+        vscode.postMessage({ kind: "t3code-host/from-frame", message: data });
       }
       return;
     }
