@@ -36,6 +36,11 @@ it("initializes React refresh before a shared UI chunk runs in bundled dev", asy
       NodePath.join(root, "src/shared.tsx"),
       "export function Shared() { return <div>ready</div>; }",
     );
+    // Only embedded builds take this branch; the bundle still has to resolve it.
+    await NodeFSP.writeFile(
+      NodePath.join(root, "src/embedHost.ts"),
+      "export const connectEmbedHost = () => Promise.resolve();",
+    );
     await NodeFSP.writeFile(
       NodePath.join(root, "src/main.tsx"),
       `import { Shared } from "./shared";
