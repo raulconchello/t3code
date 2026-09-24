@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Runs the desktop app's own CLI with plain Node child processes.
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
@@ -11,6 +12,69 @@ import * as Schema from "effect/Schema";
 export interface ServerCliCommand {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
+  /** The real files that decide what runs; see `pinServerCli`. */
+  readonly pinned: ReadonlyArray<string>;
+}
+
+/** A CLI whose version matched the server, with its files' identity at that check. */
+export interface CheckedServerCli {
+  readonly cli: ServerCliCommand;
+  readonly identity: string;
+}
+
+/**
+ * Electron's fs (VS Code's extension host) shows an .asar archive as a
+ * synthetic folder with a new inode on every stat. `noAsar` turns that off for
+ * one synchronous call; plain Node ignores it.
+ */
+const withoutAsar = <A>(run: () => A): A => {
+  const electronProcess: NodeJS.Process & { noAsar?: boolean | undefined } = process;
+  const previous = electronProcess.noAsar;
+  electronProcess.noAsar = true;
+  try {
+    return run();
+  } finally {
+    electronProcess.noAsar = previous;
+  }
+};
+
+const realFile = (filePath: string): string | null => {
+  try {
+    return withoutAsar(() => NodeFS.realpathSync.native(filePath));
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Resolves the command and any file arguments to real paths once, so the
+ * version check and the mint launch the same files even if a symlink or the
+ * app bundle is swapped in between. Bare command names (found through PATH)
+ * can't be pinned and run as given.
+ */
+export function pinServerCli(command: string, args: ReadonlyArray<string>): ServerCliCommand {
+  const pinned: string[] = [];
+  const pin = (value: string) => {
+    const real = NodePath.isAbsolute(value) || value.includes("/") ? realFile(value) : null;
+    if (real === null) return value;
+    pinned.push(real);
+    return real;
+  };
+  return { command: pin(command), args: args.map(pin), pinned };
+}
+
+/** dev, inode, size and mtime of each pinned file; any update to them changes it. */
+function cliIdentity(cli: ServerCliCommand): string {
+  return cli.pinned
+    .map((filePath) => {
+      try {
+        const stats = withoutAsar(() => NodeFS.statSync(filePath));
+        return `${filePath}:${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}`;
+      } catch {
+        return `${filePath}:missing`;
+      }
+    })
+    .join("|");
 }
 
 /** Product names the desktop app has shipped under, most likely first. */
@@ -101,12 +165,16 @@ export async function resolveDesktopAppCli(appPath: string): Promise<ServerCliCo
   if (!executable) {
     return null;
   }
-  const binary = NodePath.join(contents, "MacOS", executable);
-  const asar = NodePath.join(contents, "Resources", "app.asar");
-  if (!(await isFile(binary)) || !(await exists(asar))) {
+  const binary = realFile(NodePath.join(contents, "MacOS", executable));
+  const asar = realFile(NodePath.join(contents, "Resources", "app.asar"));
+  if (binary === null || asar === null || !(await isFile(binary)) || !(await exists(asar))) {
     return null;
   }
-  return { command: binary, args: [NodePath.join(asar, "apps", "server", "dist", "bin.mjs")] };
+  return {
+    command: binary,
+    args: [NodePath.join(asar, "apps", "server", "dist", "bin.mjs")],
+    pinned: [binary, asar],
+  };
 }
 
 class PairingCliError extends Error {
@@ -145,6 +213,8 @@ const describeVersion = (version: string | null) =>
  * running server's version. `auth pairing create` opens and migrates the T3
  * home's database, so a different version (say Nightly next to Alpha, which
  * share ~/.t3) could migrate the live database under the running server.
+ * The result carries the CLI files' identity at the check, which
+ * `mintPairingToken` verifies again right before it launches.
  */
 export async function findServerCli(input: {
   readonly serverCommand: ReadonlyArray<string>;
@@ -155,19 +225,20 @@ export async function findServerCli(input: {
   readonly homeDirectory: string;
   readonly platform: NodeJS.Platform;
   readonly readVersion?: (cli: ServerCliCommand) => Promise<string | null>;
-}): Promise<ServerCliCommand> {
+}): Promise<CheckedServerCli> {
   const readVersion = input.readVersion ?? ((cli) => readServerCliVersion(cli, input.home));
 
   const [command, ...args] = input.serverCommand.filter((part) => part.trim().length > 0);
   if (command !== undefined) {
-    const cli = { command, args };
+    const cli = pinServerCli(command, args);
+    const identity = cliIdentity(cli);
     const version = await readVersion(cli);
     if (version !== input.serverVersion) {
       throw new PairingCliError(
         `Won't pair with t3code.serverCommand: it is ${describeVersion(version)}, but the running T3 Code server is version ${input.serverVersion}. Fix the setting, or paste a pairing link instead.`,
       );
     }
-    return cli;
+    return { cli, identity };
   }
   if (input.platform !== "darwin") {
     throw new PairingCliError(
@@ -184,8 +255,9 @@ export async function findServerCli(input: {
   for (const candidate of candidates) {
     const cli = await resolveDesktopAppCli(candidate);
     if (cli === null) continue;
+    const identity = cliIdentity(cli);
     const version = await readVersion(cli);
-    if (version === input.serverVersion) return cli;
+    if (version === input.serverVersion) return { cli, identity };
     mismatches.push(`${candidate} is ${describeVersion(version)}`);
   }
   throw new PairingCliError(
@@ -230,24 +302,30 @@ export function parsePairingCliOutput(stdout: string): string | null {
 const lastLines = (text: string, count: number) =>
   text.trim().split("\n").slice(-count).join("\n").trim();
 
-/** Mints a one-time pairing token for `home` with the server CLI. */
+/**
+ * Mints a one-time pairing token for `home` with a checked CLI. Refuses when
+ * its files changed since the version check (an app update in between), since
+ * the new version could migrate the database.
+ */
 export async function mintPairingToken(input: {
-  readonly cli: ServerCliCommand;
+  readonly cli: CheckedServerCli;
   readonly home: string;
   readonly timeoutMs?: number;
 }): Promise<string> {
+  const { cli, identity } = input.cli;
+  if (cliIdentity(cli) !== identity) {
+    throw new PairingCliError(
+      "The T3 Code app changed while VS Code was pairing, perhaps because it just updated. Try again, or paste a pairing link from the desktop app.",
+    );
+  }
   let stdout: string;
   try {
-    ({ stdout } = await execFile(
-      input.cli.command,
-      [...input.cli.args, ...pairingCreateArgs(input.home)],
-      {
-        cwd: input.home,
-        env: cliEnv(),
-        timeout: input.timeoutMs ?? 30_000,
-        windowsHide: true,
-      },
-    ));
+    ({ stdout } = await execFile(cli.command, [...cli.args, ...pairingCreateArgs(input.home)], {
+      cwd: input.home,
+      env: cliEnv(),
+      timeout: input.timeoutMs ?? 30_000,
+      windowsHide: true,
+    }));
   } catch (error) {
     const stderr =
       typeof error === "object" && error !== null && "stderr" in error ? String(error.stderr) : "";
