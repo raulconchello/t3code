@@ -109,6 +109,28 @@ describe("connectEmbedHost", () => {
     expect(frame.location.reload).toHaveBeenCalledOnce();
   });
 
+  it("fails to start when the host's origin is opaque", async () => {
+    const embedHost = await loadEmbedHost();
+    const connected = embedHost.connectEmbedHost(frame as unknown as Window);
+
+    frame.receive(initMessage(), { origin: "null" });
+
+    await expect(connected).rejects.toThrow("opaque origin");
+    expect(embedHost.readEmbedHost()).toBeNull();
+  });
+
+  it("logs a reply the browser refuses to send instead of throwing", async () => {
+    const embedHost = await connect(frame);
+    frame.parent.postMessage.mockImplementation(() => {
+      throw new DOMException("Invalid target origin", "SyntaxError");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    expect(() => embedHost.reportEmbedHostStatus({ phase: "ready" })).not.toThrow();
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
   it("refuses to start outside a frame", async () => {
     const embedHost = await loadEmbedHost();
     const topWindow = { parent: null as unknown };

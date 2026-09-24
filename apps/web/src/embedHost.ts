@@ -16,7 +16,7 @@ export const EMBED_HOST_BUILD = import.meta.env.VITE_T3CODE_EMBED_HOST === "vsco
 interface EmbedHostConnection {
   readonly init: EmbedHostInitMessage;
   readonly host: Window;
-  /** Replies go to the origin the init came from; see `hostTargetOrigin`. */
+  /** Replies go to the origin the init came from. */
   readonly origin: string;
 }
 
@@ -31,7 +31,9 @@ export function readEmbedHost(): EmbedHostInitMessage | null {
  * Says hello to the parent window and resolves with the first init it sends
  * back. Messages from anything but the parent window are ignored. A later init
  * from the same origin that differs from the first one reloads the app, so the
- * host can swap credentials or the workspace; an identical one is ignored.
+ * host can swap credentials or the workspace; an identical one is ignored. An
+ * init from an opaque ("null") origin fails the start: replies could not be
+ * addressed to it without sending them to any origin.
  */
 export function connectEmbedHost(target: Window = window): Promise<EmbedHostInitMessage> {
   if (connection !== null) return Promise.resolve(connection.init);
@@ -39,10 +41,15 @@ export function connectEmbedHost(target: Window = window): Promise<EmbedHostInit
     return Promise.reject(new Error("This build of T3 Code only runs inside its host app."));
   }
 
-  return new Promise((resolve) => {
-    target.addEventListener("message", (event) => {
+  return new Promise((resolve, reject) => {
+    const onMessage = (event: MessageEvent) => {
       if (event.source !== target.parent || !isEmbedHostToFrameMessage(event.data)) return;
       if (connection === null) {
+        if (event.origin === "null") {
+          target.removeEventListener("message", onMessage);
+          reject(new Error("The host page has an opaque origin, so T3 Code cannot answer it."));
+          return;
+        }
         connection = { init: event.data, host: target.parent, origin: event.origin };
         installExternalLinkHandler(target);
         resolve(event.data);
@@ -51,7 +58,8 @@ export function connectEmbedHost(target: Window = window): Promise<EmbedHostInit
       if (event.origin !== connection.origin) return;
       if (JSON.stringify(event.data) === JSON.stringify(connection.init)) return;
       target.location.reload();
-    });
+    };
+    target.addEventListener("message", onMessage);
     // The hello carries nothing private and the host's origin is not known yet.
     target.parent.postMessage(
       {
@@ -63,14 +71,17 @@ export function connectEmbedHost(target: Window = window): Promise<EmbedHostInit
   });
 }
 
-// An opaque origin ("null") cannot be targeted, so fall back to any origin.
-function hostTargetOrigin(origin: string): string {
-  return origin === "null" ? "*" : origin;
-}
-
-/** Sends a message to the host. A no-op until the host has sent its init. */
+/**
+ * Sends a message to the host, addressed to the origin its init came from. A
+ * no-op until then. A failed send is logged, never thrown into the caller.
+ */
 export function postToEmbedHost(message: EmbedFrameToHostMessage): void {
-  connection?.host.postMessage(message, hostTargetOrigin(connection.origin));
+  if (connection === null) return;
+  try {
+    connection.host.postMessage(message, connection.origin);
+  } catch (error) {
+    console.warn("T3 Code could not send a message to its host page.", error);
+  }
 }
 
 export function reportEmbedHostStatus(

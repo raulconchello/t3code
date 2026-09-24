@@ -31,7 +31,12 @@ const isSingleOriginDev = process.env.T3CODE_SINGLE_ORIGIN_DEV === "1";
 // runtime. No backend URL, hosted-app origin or cloud config may be baked in,
 // even when `.env` supplies one.
 const configuredEmbedHost = process.env.VITE_T3CODE_EMBED_HOST?.trim() || "";
-const isEmbedHostBuild = configuredEmbedHost !== "";
+if (configuredEmbedHost !== "" && configuredEmbedHost !== "vscode") {
+  throw new Error(
+    `VITE_T3CODE_EMBED_HOST must be "vscode" or unset, not "${configuredEmbedHost}".`,
+  );
+}
+const isEmbedHostBuild = configuredEmbedHost === "vscode";
 const publicEnv: Record<string, string | undefined> = isEmbedHostBuild ? {} : repoEnv;
 
 const port = Number(process.env.PORT ?? 5733);
