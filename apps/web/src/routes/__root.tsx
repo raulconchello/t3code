@@ -80,9 +80,12 @@ import { installDesktopPasteAsText } from "../lib/desktopPasteAsText";
 import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
 
 export const Route = createRootRoute({
-  beforeLoad: async ({ location }) => {
+  beforeLoad: async ({ location, matches }) => {
     // Pages that list or add other projects are out of reach under a workspace lock.
-    const lockedRedirect = resolveLockedRouteRedirect(location.pathname, readWorkspaceLock());
+    const lockedRedirect = resolveLockedRouteRedirect(
+      matches.map((match) => match.routeId),
+      readWorkspaceLock(),
+    );
     if (lockedRedirect !== null) {
       throw redirect({ to: lockedRedirect, replace: true });
     }

@@ -74,7 +74,7 @@ export interface SettingsSearchAvailability {
   readonly canManageLocalBackend: boolean;
   readonly isWslSettingsRowVisible: boolean;
   readonly hasThreadAutoSettlement: boolean;
-  /** Under a workspace lock the Connections section is out of reach. */
+  /** Under a workspace lock Connections and Diagnostics are out of reach. */
   readonly workspaceLocked?: boolean;
 }
 
@@ -936,13 +936,18 @@ export function searchableSetting(id: SettingsSearchItemId): {
   return { id: anchorId, title };
 }
 
+/** Connections manage every environment and diagnostics list every process. */
+function isWorkspaceLockedSearchItem(item: SettingsSearchItem): boolean {
+  return item.to === "/settings/connections" || item.id === "diagnostics";
+}
+
 export function filterAvailableSettingsSearchItems(
   availability: SettingsSearchAvailability,
 ): ReadonlyArray<SettingsSearchItem> {
   const items: ReadonlyArray<SettingsSearchItem> = SETTINGS_SEARCH_ITEMS;
   return items.filter(
     (item) =>
-      (item.to !== "/settings/connections" || !availability.workspaceLocked) &&
+      (!availability.workspaceLocked || !isWorkspaceLockedSearchItem(item)) &&
       (!item.cloudOnly || availability.hasCloudPublicConfig) &&
       (!item.environmentOnly || availability.hasEnvironment) &&
       (!item.providerSettingsOnly || availability.hasProviderSettingsEnvironment) &&

@@ -33,7 +33,7 @@ export function useAvailableSettingsSearchItems() {
   return useMemo(
     () =>
       filterAvailableSettingsSearchItems({
-        // Connections manage every environment, so a workspace lock leaves them out.
+        // Connections and diagnostics reach past the workspace, so a lock leaves them out.
         workspaceLocked: isWorkspaceLocked,
         localEnvironmentDisabled,
         hasCloudPublicConfig: hasCloudPublicConfig(),

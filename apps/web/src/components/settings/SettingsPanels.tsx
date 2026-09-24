@@ -169,6 +169,7 @@ import {
   useSettingsSearchTargetId,
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+import { isWorkspaceLocked } from "../../workspaceLock";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
 
@@ -3198,25 +3199,31 @@ export function GeneralSettingsPanel() {
         )}
       </SettingsSection>
       <SettingsSection title="Diagnostics">
-        <SettingsRow
-          {...searchableSetting("diagnostics")}
-          description={
-            isEnvironmentScope
-              ? "Inspect processes, resource use, and logs on this environment."
-              : "Inspect processes, resource use, and logs on one environment at a time."
-          }
-          control={
-            <Button
-              render={
-                <Link to="/settings/diagnostics" search={{ machine: environmentId ?? undefined }} />
-              }
-              size="sm"
-              variant="outline"
-            >
-              View diagnostics
-            </Button>
-          }
-        />
+        {/* Diagnostics list every process on the machine, so a workspace lock leaves them out. */}
+        {isWorkspaceLocked ? null : (
+          <SettingsRow
+            {...searchableSetting("diagnostics")}
+            description={
+              isEnvironmentScope
+                ? "Inspect processes, resource use, and logs on this environment."
+                : "Inspect processes, resource use, and logs on one environment at a time."
+            }
+            control={
+              <Button
+                render={
+                  <Link
+                    to="/settings/diagnostics"
+                    search={{ machine: environmentId ?? undefined }}
+                  />
+                }
+                size="sm"
+                variant="outline"
+              >
+                View diagnostics
+              </Button>
+            }
+          />
+        )}
         <SettingsRow
           {...searchableSetting("open-source-licenses")}
           description="Notices for dependencies, assets, and optional tools used by T3 Code."
