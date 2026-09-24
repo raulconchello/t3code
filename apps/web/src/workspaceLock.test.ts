@@ -21,6 +21,7 @@ import {
   findLockedProject,
   isProjectInLock,
   isThreadRouteOutsideLock,
+  keepThreadsInLock,
   lockShellSnapshot,
   resolveLockedNewThreadProjectRef,
   resolveLockedRouteRedirect,
@@ -311,5 +312,23 @@ describe("resolveLockedNewThreadProjectRef", () => {
     expect(
       resolveLockedNewThreadProjectRef(appRef, lock, [scoped("other", "/work/other")]),
     ).toBeNull();
+  });
+});
+
+describe("keepThreadsInLock", () => {
+  const lock = lockFor("/work/app");
+  const linked = [
+    { id: ThreadId.make("t1"), projectId: ProjectId.make("app"), title: "Mine" },
+    { id: ThreadId.make("t2"), projectId: ProjectId.make("other"), title: "Someone else's" },
+  ];
+  const lockedProjectIds = new Set([ProjectId.make("app")]);
+
+  it("keeps only threads of the locked projects", () => {
+    expect(keepThreadsInLock(linked, LOCKED, lock, lockedProjectIds)).toEqual([linked[0]]);
+  });
+
+  it("keeps nothing from other environments or before the projects are known", () => {
+    expect(keepThreadsInLock(linked, OTHER, lock, lockedProjectIds)).toEqual([]);
+    expect(keepThreadsInLock(linked, LOCKED, lock, null)).toEqual([]);
   });
 });

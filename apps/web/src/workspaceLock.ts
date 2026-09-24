@@ -229,3 +229,18 @@ export function resolveLockedNewThreadProjectRef(
   const project = findLockedProject(lockedProjects, lock);
   return project === null ? null : { environmentId: project.environmentId, projectId: project.id };
 }
+
+/**
+ * The threads in a server-side list, such as a pull request's linked threads,
+ * that are inside the lock. Such lists skip the shell's filtering, so every
+ * one has to pass through here. Empty until the locked projects are known.
+ */
+export function keepThreadsInLock<T extends { readonly projectId: ProjectId }>(
+  threads: ReadonlyArray<T>,
+  environmentId: EnvironmentId,
+  lock: WorkspaceLock,
+  lockedProjectIds: ReadonlySet<ProjectId> | null,
+): ReadonlyArray<T> {
+  if (environmentId !== lock.environmentId || lockedProjectIds === null) return [];
+  return threads.filter((thread) => lockedProjectIds.has(thread.projectId));
+}

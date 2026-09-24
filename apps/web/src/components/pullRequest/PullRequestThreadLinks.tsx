@@ -5,6 +5,7 @@ import { CheckIcon, MessageSquareIcon } from "lucide-react";
 import { useState } from "react";
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
 import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
+import { useWorkspaceLock } from "~/hooks/useWorkspaceLock";
 
 import { parseChangeRequestUrl } from "~/lib/openPullRequestLink";
 import { normalizeThreadPullRequestKey } from "@t3tools/shared/threadPullRequests";
@@ -13,6 +14,7 @@ import { pullRequestEnvironment } from "~/state/pullRequests";
 import { useEnvironmentQuery } from "~/state/query";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { openCommandPalette } from "~/commandPaletteBus";
+import { keepThreadsInLock } from "~/workspaceLock";
 import { Button } from "../ui/button";
 import { Command, CommandInput, CommandItem, CommandList } from "../ui/command";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
@@ -53,6 +55,7 @@ function EnabledPullRequestThreadLinks({
   const currentThreadRef = threadRef?.environmentId === environmentId ? threadRef : null;
   const thread = useThreadShell(currentThreadRef);
   const linking = usePullRequestLinking(environmentId);
+  const workspaceLock = useWorkspaceLock();
   const linkedHere = linking.isLinked(thread, url);
   const relations = useEnvironmentQuery(
     linking.mode === "multiple" && display !== "menu-item"
@@ -100,8 +103,19 @@ function EnabledPullRequestThreadLinks({
   };
 
   if (parsed === null || (!linkedHere && !linking.canLink(url))) return null;
-  const linkedThreads =
+  const relatedThreads =
     linking.mode === "multiple" ? ((relations.data ?? lastRelations)?.threads ?? []) : [];
+  // Relations come from the server unfiltered: under a workspace lock only
+  // threads of the locked project may be counted or listed.
+  const linkedThreads =
+    workspaceLock === null
+      ? relatedThreads
+      : keepThreadsInLock(
+          relatedThreads,
+          environmentId,
+          workspaceLock.lock,
+          workspaceLock.projectIds,
+        );
   const linkedThreadsLabel =
     linkedThreads.length > 0
       ? `Linked from ${linkedThreads.length} ${linkedThreads.length === 1 ? "thread" : "threads"}`
