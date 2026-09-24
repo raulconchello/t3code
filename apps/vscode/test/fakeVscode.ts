@@ -53,6 +53,8 @@ export const StatusBarAlignment = { Left: 1, Right: 2 } as const;
 export const ViewColumn = { Active: -1 } as const;
 export const ExtensionMode = { Production: 1, Development: 2, Test: 3 } as const;
 
+const panelOf = new WeakMap<object, FakePanel>();
+
 export class FakePanel {
   title = "";
   iconPath: unknown;
@@ -60,18 +62,33 @@ export class FakePanel {
   disposed = false;
   /** Every message the extension posted to the webview. */
   readonly posted: unknown[] = [];
+  /** How many times the extension set the webview's page. */
+  renders = 0;
   private readonly disposeEmitter = new Emitter<void>();
   private readonly messageEmitter = new Emitter<unknown>();
   readonly onDidDispose = this.disposeEmitter.event;
+  private page = "";
   readonly webview = {
     options: {},
-    html: "",
+    get html() {
+      return panelOf.get(this)?.page ?? "";
+    },
+    set html(value: string) {
+      const panel = panelOf.get(this);
+      if (!panel) return;
+      panel.page = value;
+      panel.renders += 1;
+    },
     onDidReceiveMessage: this.messageEmitter.event,
     postMessage: async (message: unknown) => {
       this.posted.push(message);
       return true;
     },
   };
+
+  constructor() {
+    panelOf.set(this.webview, this);
+  }
 
   /** A message from the webview's relay script. */
   receive(message: unknown) {
@@ -108,6 +125,13 @@ export const fake = {
   /** The button the user picks in the consent modal. */
   consentAnswer: undefined as string | undefined,
   modalPrompts: 0,
+  /** Picks an item in a quick pick; the default dismisses it. */
+  pick: undefined as ((items: ReadonlyArray<unknown>) => unknown) | undefined,
+  /** The text typed into an input box; undefined dismisses it. */
+  inputAnswer: undefined as string | undefined,
+  /** The button the user picks in a warning; undefined dismisses it. */
+  warningAnswer: undefined as string | undefined,
+  warnings: [] as string[],
   errors: [] as string[],
   opened: [] as string[],
   reset() {
@@ -117,6 +141,10 @@ export const fake = {
     this.serializer = null;
     this.consentAnswer = undefined;
     this.modalPrompts = 0;
+    this.pick = undefined;
+    this.inputAnswer = undefined;
+    this.warningAnswer = undefined;
+    this.warnings = [];
     this.errors = [];
     this.opened = [];
     commandRegistry.clear();
@@ -169,13 +197,16 @@ export const window = {
     }
     return undefined;
   },
-  showWarningMessage: async () => undefined,
+  showWarningMessage: async (message: string) => {
+    fake.warnings.push(message);
+    return fake.warningAnswer;
+  },
   showErrorMessage: async (message: string) => {
     fake.errors.push(message);
     return undefined;
   },
-  showQuickPick: async () => undefined,
-  showInputBox: async () => undefined,
+  showQuickPick: async (items: ReadonlyArray<unknown>) => fake.pick?.(items),
+  showInputBox: async () => fake.inputAnswer,
 };
 
 export const commands = {
