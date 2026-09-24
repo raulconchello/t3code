@@ -46,21 +46,59 @@ const realFile = (filePath: string): string | null => {
   }
 };
 
+const isPathLike = (value: string) =>
+  NodePath.isAbsolute(value) || value.includes("/") || value.includes("\\");
+
+const isExecutableFile = (filePath: string) => {
+  try {
+    NodeFS.accessSync(filePath, NodeFS.constants.X_OK);
+    return NodeFS.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+};
+
+/** Finds a bare command name on `searchPath` the way a shell would; null if it isn't there. */
+function findOnPath(command: string, searchPath: string): string | null {
+  // Windows also tries the command with each executable extension.
+  const extensions = (process.env.PATHEXT ?? "").split(";").filter(Boolean);
+  const names =
+    NodePath.extname(command) === ""
+      ? [command, ...extensions.map((ext) => command + ext)]
+      : [command];
+  for (const dir of searchPath.split(NodePath.delimiter)) {
+    if (dir.length === 0) continue;
+    for (const name of names) {
+      const candidate = NodePath.join(dir, name);
+      if (isExecutableFile(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
 /**
- * Resolves the command and any file arguments to real paths once, so the
- * version check and the mint launch the same files even if a symlink or the
- * app bundle is swapped in between. Bare command names (found through PATH)
- * can't be pinned and run as given.
+ * Resolves the command (through `searchPath` when it is a bare name) and any
+ * file arguments to real paths once, so the version check and the mint launch
+ * the same files even if PATH, a symlink or the app bundle changes in between.
+ * A bare name that isn't on the path is left as is and fails its version check.
  */
-export function pinServerCli(command: string, args: ReadonlyArray<string>): ServerCliCommand {
+export function pinServerCli(
+  command: string,
+  args: ReadonlyArray<string>,
+  searchPath = process.env.PATH ?? "",
+): ServerCliCommand {
   const pinned: string[] = [];
-  const pin = (value: string) => {
-    const real = NodePath.isAbsolute(value) || value.includes("/") ? realFile(value) : null;
+  const pin = (value: string, found: string | null) => {
+    const real = found === null ? null : realFile(found);
     if (real === null) return value;
     pinned.push(real);
     return real;
   };
-  return { command: pin(command), args: args.map(pin), pinned };
+  return {
+    command: pin(command, isPathLike(command) ? command : findOnPath(command, searchPath)),
+    args: args.map((arg) => pin(arg, isPathLike(arg) ? arg : null)),
+    pinned,
+  };
 }
 
 /** dev, inode, size and mtime of each pinned file; any update to them changes it. */
@@ -225,12 +263,14 @@ export async function findServerCli(input: {
   readonly homeDirectory: string;
   readonly platform: NodeJS.Platform;
   readonly readVersion?: (cli: ServerCliCommand) => Promise<string | null>;
+  /** Where a bare serverCommand is looked up; defaults to PATH. */
+  readonly searchPath?: string;
 }): Promise<CheckedServerCli> {
   const readVersion = input.readVersion ?? ((cli) => readServerCliVersion(cli, input.home));
 
   const [command, ...args] = input.serverCommand.filter((part) => part.trim().length > 0);
   if (command !== undefined) {
-    const cli = pinServerCli(command, args);
+    const cli = pinServerCli(command, args, input.searchPath);
     const identity = cliIdentity(cli);
     const version = await readVersion(cli);
     if (version !== input.serverVersion) {
@@ -313,6 +353,9 @@ export async function mintPairingToken(input: {
   readonly timeoutMs?: number;
 }): Promise<string> {
   const { cli, identity } = input.cli;
+  // What remains is a swap between this check and the exec loading the files.
+  // macOS replaces an app bundle only after the app quits, when no server runs
+  // to pair with, so that window is left open.
   if (cliIdentity(cli) !== identity) {
     throw new PairingCliError(
       "The T3 Code app changed while VS Code was pairing, perhaps because it just updated. Try again, or paste a pairing link from the desktop app.",

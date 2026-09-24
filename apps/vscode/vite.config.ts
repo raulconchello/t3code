@@ -48,5 +48,7 @@ export default defineConfig({
     // Unit tests run outside VS Code; the controller tests drive a fake of its API.
     alias: { vscode: NodeURL.fileURLToPath(new URL("./test/fakeVscode.ts", import.meta.url)) },
     setupFiles: ["../../packages/shared/src/testing/longTempDir.ts"],
+    // Several tests launch real Node child processes, which can be slow on a busy machine.
+    testTimeout: 15_000,
   },
 });
