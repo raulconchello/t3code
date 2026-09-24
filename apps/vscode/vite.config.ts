@@ -1,4 +1,5 @@
 import "vite-plus/test/config";
+import * as NodeURL from "node:url";
 import { defineConfig } from "vite-plus";
 
 import webPackageJson from "../web/package.json" with { type: "json" };
@@ -6,8 +7,10 @@ import webPackageJson from "../web/package.json" with { type: "json" };
 // VS Code provides `vscode` at runtime; everything else, including the
 // workspace packages and Effect, is inlined into one CommonJS file.
 const isVscodeModule = (id: string) => id === "vscode";
+const webVersionDefine = { __T3CODE_WEB_VERSION__: JSON.stringify(webPackageJson.version) };
 
 export default defineConfig({
+  define: webVersionDefine,
   run: {
     tasks: {
       build: {
@@ -34,9 +37,7 @@ export default defineConfig({
     outExtensions: () => ({ js: ".cjs" }),
     outputOptions: { codeSplitting: false },
     entry: ["src/extension.ts"],
-    define: {
-      __T3CODE_WEB_VERSION__: JSON.stringify(webPackageJson.version),
-    },
+    define: webVersionDefine,
     deps: {
       alwaysBundle: (id) => !id.startsWith("node:") && !isVscodeModule(id),
       neverBundle: isVscodeModule,
@@ -44,6 +45,8 @@ export default defineConfig({
     },
   },
   test: {
+    // Unit tests run outside VS Code; the controller tests drive a fake of its API.
+    alias: { vscode: NodeURL.fileURLToPath(new URL("./test/fakeVscode.ts", import.meta.url)) },
     setupFiles: ["../../packages/shared/src/testing/longTempDir.ts"],
   },
 });

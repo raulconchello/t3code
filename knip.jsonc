@@ -57,8 +57,9 @@
         "scripts/smoke-test.ts",
         "test/smoke/suite.cjs",
       ],
-      // The Vite+ build prerequisite for the embedded web app.
-      "ignoreDependencies": ["@t3tools/web"],
+      // The Vite+ build prerequisite for the embedded web app, and the types of the
+      // `vscode` module VS Code provides (unit tests alias it to a fake).
+      "ignoreDependencies": ["@t3tools/web", "@types/vscode"],
     },
     "apps/web": {
       // Worktree setup invokes this directly from t3.json.

@@ -14,9 +14,11 @@ import {
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as vscode from "vscode";
 
+import { AppServers } from "./appServers.ts";
 import {
   PairingConsentError,
   type PairingDeps,
+  type SecretStore,
   bearerSecretKey,
   ensureBearerToken,
   exchangePairingCredential,
@@ -30,6 +32,7 @@ import {
   resolveT3Home,
   versionSkewWarning,
 } from "./desktopServer.ts";
+import { externalUrlToOpen, recordAuthFailure } from "./guards.ts";
 import { findServerCli, mintPairingToken } from "./pairingCli.ts";
 import { type PanelAction, WEBVIEW_TYPE, WorkspacePanel, isPanelState } from "./panel.ts";
 import { type StaticServer, startStaticServer } from "./staticServer.ts";
@@ -38,7 +41,9 @@ import { workspaceLockFor } from "./workspaceLock.ts";
 declare const __T3CODE_WEB_VERSION__: string;
 
 const CONSENT_KEY = "t3code.pairingConsent";
-const portKey = (folder: vscode.WorkspaceFolder) => `t3code.port:${folder.uri.toString()}`;
+/** SecretStorage keys holding bearer tokens, so Disconnect can find them without a server. */
+const SECRET_KEYS_KEY = "t3code.bearerSecretKeys";
+const portKey = (folderKey: string) => `t3code.port:${folderKey}`;
 
 /** Resolved by the web app's own status messages, for the VS Code smoke test. */
 export interface T3CodeTestApi {
@@ -89,7 +94,8 @@ class FolderSession implements vscode.Disposable {
   readonly folder: vscode.WorkspaceFolder;
   readonly view: WorkspacePanel;
   private readonly handlers: FolderSessionHandlers;
-  staticServer: StaticServer | null = null;
+  /** Bumped by every start; only the latest start may update the page. */
+  startAttempt = 0;
   lastStatus: EmbedHostStatusMessage | null = null;
   hostError: string | null = null;
   /** The bearer token in the last init, so an auth failure never gets it back. */
@@ -128,8 +134,6 @@ class FolderSession implements vscode.Disposable {
     this.disposed = true;
     this.view.dispose();
     this.view.panel.dispose();
-    void this.staticServer?.close();
-    this.staticServer = null;
     this.handlers.onDispose(this);
   }
 }
@@ -140,8 +144,14 @@ class T3CodeController implements vscode.Disposable {
   private readonly warnedVersions = new Set<string>();
   private readonly statusItem: vscode.StatusBarItem;
   private readonly platform = HostProcessPlatform.defaultValue();
+  private readonly appServers = new AppServers((key) => this.startStaticServer(key));
   private connection: Connection | null = null;
-  private pendingConnection: Promise<Connection> | null = null;
+  private pendingConnection: {
+    readonly interactive: boolean;
+    readonly promise: Promise<Connection>;
+  } | null = null;
+  /** Bumped by Disconnect so an attempt still in flight can't reconnect afterwards. */
+  private connectionEpoch = 0;
   private readonly context: vscode.ExtensionContext;
 
   constructor(context: vscode.ExtensionContext) {
@@ -226,15 +236,15 @@ class T3CodeController implements vscode.Disposable {
   }
 
   async disconnect(): Promise<void> {
-    const environmentId =
-      this.connection?.server.environmentId ??
-      (await this.discover().catch(() => null))?.environmentId;
     for (const session of this.sessions.values()) session.dispose();
+    this.connectionEpoch += 1;
     this.connection = null;
-    await this.context.globalState.update(CONSENT_KEY, undefined);
-    if (environmentId) {
-      await this.context.secrets.delete(bearerSecretKey(environmentId));
-    }
+    this.pendingConnection = null;
+    const { globalState, secrets } = this.context;
+    const keys = globalState.get<ReadonlyArray<string>>(SECRET_KEYS_KEY) ?? [];
+    await Promise.all(keys.map((key) => secrets.delete(key)));
+    await globalState.update(SECRET_KEYS_KEY, undefined);
+    await globalState.update(CONSENT_KEY, undefined);
     void vscode.window.showInformationMessage(
       "T3 Code is disconnected. VS Code will ask before pairing again. To end VS Code's session on the server, revoke it in the desktop app's settings.",
     );
@@ -259,6 +269,7 @@ class T3CodeController implements vscode.Disposable {
       onAction: (target, id) => void this.onAction(target, id),
       onDispose: (target) => {
         if (this.sessions.get(target.key) === target) this.sessions.delete(target.key);
+        void this.appServers.close(target.key);
         this.updateStatusItem();
       },
     });
@@ -271,17 +282,20 @@ class T3CodeController implements vscode.Disposable {
     session: FolderSession,
     options: { readonly interactive: boolean; readonly rejectedToken?: string },
   ): Promise<void> {
+    const attempt = ++session.startAttempt;
+    const isCurrent = () => !session.isDisposed && session.startAttempt === attempt;
     session.hostError = null;
     session.lastStatus = null;
     session.view.showMessage("Connecting to T3 Code…");
     this.updateStatusItem();
     try {
       await this.getConnection(options);
-      session.staticServer ??= await this.startStaticServer(session.folder);
-      if (session.isDisposed) return;
-      session.view.showApp(session.staticServer.origin);
+      if (!isCurrent()) return;
+      const server = await this.appServers.get(session.key);
+      if (!isCurrent()) return;
+      session.view.showApp(server.origin);
     } catch (error) {
-      if (session.isDisposed) return;
+      if (!isCurrent()) return;
       const failure = toHostError(error);
       session.hostError = failure.message;
       session.view.showMessage(failure.title, failure.detail, failure.actions);
@@ -298,7 +312,7 @@ class T3CodeController implements vscode.Disposable {
     );
   }
 
-  private async startStaticServer(folder: vscode.WorkspaceFolder): Promise<StaticServer> {
+  private async startStaticServer(folderKey: string): Promise<StaticServer> {
     const root = vscode.Uri.joinPath(this.context.extensionUri, "dist", "web").fsPath;
     if (!NodeFS.existsSync(NodePath.join(root, "index.html"))) {
       throw new HostError(
@@ -307,14 +321,14 @@ class T3CodeController implements vscode.Disposable {
         [],
       );
     }
-    const preferredPort = this.context.globalState.get<number>(portKey(folder));
+    const preferredPort = this.context.globalState.get<number>(portKey(folderKey));
     const server = await startStaticServer({
       root,
       ...(preferredPort ? { preferredPort } : {}),
     });
     // Keeping the port keeps the app's origin, and with it this folder's drafts and UI state.
     if (server.port !== preferredPort) {
-      await this.context.globalState.update(portKey(folder), server.port);
+      await this.context.globalState.update(portKey(folderKey), server.port);
     }
     return server;
   }
@@ -331,9 +345,11 @@ class T3CodeController implements vscode.Disposable {
         this.updateStatusItem();
         if (message.phase === "auth-failed") await this.recoverFromAuthFailure(session);
         return;
-      case "t3code/open-external":
-        await openExternalUrl(message.url);
+      case "t3code/open-external": {
+        const url = externalUrlToOpen(message.url);
+        if (url !== null) await vscode.env.openExternal(vscode.Uri.parse(url, true));
         return;
+      }
     }
   }
 
@@ -370,9 +386,9 @@ class T3CodeController implements vscode.Disposable {
 
   /** Pairs again (silently once consent is on record) and reloads the app. */
   private async recoverFromAuthFailure(session: FolderSession) {
-    const now = Date.now();
-    session.authFailures = [...session.authFailures.filter((at) => now - at < 60_000), now];
-    if (session.authFailures.length > 2) {
+    const { recent, exhausted } = recordAuthFailure(session.authFailures, Date.now());
+    session.authFailures = recent;
+    if (exhausted) {
       session.hostError = "T3 Code keeps rejecting VS Code's session.";
       session.view.showMessage(
         "T3 Code keeps rejecting VS Code's session.",
@@ -435,7 +451,11 @@ class T3CodeController implements vscode.Disposable {
     }
   }
 
-  /** One shared connection per window; concurrent callers wait for the same attempt. */
+  /**
+   * One shared connection per window; overlapping callers share one attempt.
+   * A silent attempt can't ask for consent and may return a token a caller
+   * just saw rejected, so such callers start their own attempt after it.
+   */
   private getConnection(options: {
     readonly interactive: boolean;
     readonly rejectedToken?: string;
@@ -443,7 +463,16 @@ class T3CodeController implements vscode.Disposable {
     if (this.connection && this.connection.bearerToken !== options.rejectedToken) {
       return Promise.resolve(this.connection);
     }
-    this.pendingConnection ??= (async () => {
+    const pending = this.pendingConnection;
+    if (pending) {
+      if ((pending.interactive || !options.interactive) && !options.rejectedToken) {
+        return pending.promise;
+      }
+      const retry = () => this.getConnection(options);
+      return pending.promise.then(retry, retry);
+    }
+    const epoch = this.connectionEpoch;
+    const promise = (async () => {
       const server = await this.discover();
       this.warnAboutVersionSkew(server);
       const bearerToken = await ensureBearerToken(
@@ -451,18 +480,37 @@ class T3CodeController implements vscode.Disposable {
         this.pairingDeps(server),
         options,
       );
+      if (epoch !== this.connectionEpoch) {
+        await this.context.secrets.delete(bearerSecretKey(server.environmentId));
+        throw new PairingConsentError("T3 Code was disconnected.");
+      }
       this.connection = { server, bearerToken };
       return this.connection;
     })().finally(() => {
-      this.pendingConnection = null;
+      if (this.pendingConnection?.promise === promise) this.pendingConnection = null;
     });
-    return this.pendingConnection;
+    this.pendingConnection = { interactive: options.interactive, promise };
+    return promise;
+  }
+
+  /** SecretStorage that remembers which keys it wrote, for Disconnect. */
+  private trackedSecrets(): SecretStore {
+    const { globalState, secrets } = this.context;
+    return {
+      get: (key) => secrets.get(key),
+      store: async (key, value) => {
+        const keys = globalState.get<ReadonlyArray<string>>(SECRET_KEYS_KEY) ?? [];
+        if (!keys.includes(key)) await globalState.update(SECRET_KEYS_KEY, [...keys, key]);
+        await secrets.store(key, value);
+      },
+      delete: (key) => secrets.delete(key),
+    };
   }
 
   private pairingDeps(server: DesktopServer): PairingDeps {
     const config = vscode.workspace.getConfiguration("t3code");
     return {
-      secrets: this.context.secrets,
+      secrets: this.trackedSecrets(),
       hasConsent: () => this.context.globalState.get<boolean>(CONSENT_KEY) === true,
       recordConsent: () => this.context.globalState.update(CONSENT_KEY, true),
       askConsent: async () => {
@@ -649,6 +697,7 @@ class T3CodeController implements vscode.Disposable {
 
   dispose(): void {
     for (const session of this.sessions.values()) session.dispose();
+    void this.appServers.closeAll();
     this.statusItem.dispose();
     this.listeners.clear();
   }
@@ -667,19 +716,7 @@ function toHostError(error: unknown): HostError {
 }
 
 function errorText(error: unknown): string {
-  if (error instanceof HostError) return error.message;
   return error instanceof Error ? error.message : String(error);
-}
-
-async function openExternalUrl(url: string) {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return;
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
-  await vscode.env.openExternal(vscode.Uri.parse(parsed.toString(), true));
 }
 
 export function activate(context: vscode.ExtensionContext): T3CodeTestApi | undefined {
