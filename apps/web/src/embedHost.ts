@@ -131,10 +131,30 @@ const FUNCTION_KEY = /^F(?:[1-9]|1[0-2])$/;
 const MODIFIER_KEYS = new Set(["Alt", "AltGraph", "Control", "Meta", "Shift", "CapsLock"]);
 /** Select all, copy, cut, paste, undo and redo (plus Shift+Z), which the frame keeps. */
 const EDITING_KEYS = new Set(["a", "c", "v", "x", "y", "z"]);
+/** Caret movement and deletion keep their native meaning with any modifier. */
+const NAVIGATION_KEYS = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+  "Backspace",
+  "Delete",
+]);
 
 type ShortcutKeys = Pick<
   KeyboardEvent,
-  "key" | "code" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey"
+  | "key"
+  | "code"
+  | "altKey"
+  | "ctrlKey"
+  | "metaKey"
+  | "shiftKey"
+  | "isComposing"
+  | "getModifierState"
 >;
 
 const editingLetter = (event: ShortcutKeys) => {
@@ -145,16 +165,22 @@ const editingLetter = (event: ShortcutKeys) => {
 
 /**
  * Whether a keydown is a shortcut for the host rather than input for the app:
- * a function key, or a key pressed with Ctrl (or Cmd on macOS). Plain typing
- * and the native editing shortcuts stay in the frame.
+ * a function key, or a key pressed with Ctrl (or Cmd on macOS). Text input
+ * stays in the frame: plain typing, IME composition, AltGr characters (which
+ * Windows and Linux report as Ctrl+Alt), caret movement and deletion, and the
+ * native editing shortcuts.
  */
 export function isHostShortcut(
   event: ShortcutKeys,
   platform: EmbedHostWorkspace["platform"],
 ): boolean {
+  if (event.isComposing || event.getModifierState("AltGraph")) return false;
+  if (NAVIGATION_KEYS.has(event.key)) return false;
   if (FUNCTION_KEY.test(event.key)) return true;
   const command = event.ctrlKey || (platform === "darwin" && event.metaKey);
   if (!command || MODIFIER_KEYS.has(event.key)) return false;
+  const printable = event.key.length === 1;
+  if (platform !== "darwin" && event.ctrlKey && event.altKey && printable) return false;
   const letter = editingLetter(event);
   if (letter === undefined || event.altKey) return true;
   return event.shiftKey && letter !== "z";
@@ -172,7 +198,7 @@ function installHostShortcutForwarding(
   platform: EmbedHostWorkspace["platform"],
 ): void {
   target.addEventListener("keydown", (event) => {
-    if (event.isComposing || !isHostShortcut(event, platform)) return;
+    if (!isHostShortcut(event, platform)) return;
     setTimeout(() => {
       if (event.defaultPrevented) return;
       postToEmbedHost({

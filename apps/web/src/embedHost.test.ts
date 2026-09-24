@@ -166,7 +166,12 @@ interface KeyInit {
   readonly ctrlKey?: boolean;
   readonly metaKey?: boolean;
   readonly shiftKey?: boolean;
+  readonly isComposing?: boolean;
+  readonly altGraph?: boolean;
 }
+
+const modifierState = (init: KeyInit) => (modifier: string) =>
+  modifier === "AltGraph" && init.altGraph === true;
 
 function keydown(init: KeyInit) {
   const event = new Event("keydown", { cancelable: true });
@@ -179,7 +184,8 @@ function keydown(init: KeyInit) {
     metaKey: { value: init.metaKey ?? false },
     shiftKey: { value: init.shiftKey ?? false },
     repeat: { value: false },
-    isComposing: { value: false },
+    isComposing: { value: init.isComposing ?? false },
+    getModifierState: { value: modifierState(init) },
   });
   return event;
 }
@@ -190,7 +196,9 @@ const keys = (init: KeyInit) => ({
   ctrlKey: false,
   metaKey: false,
   shiftKey: false,
+  isComposing: false,
   ...init,
+  getModifierState: modifierState(init),
 });
 
 describe("isHostShortcut", () => {
@@ -225,10 +233,51 @@ describe("isHostShortcut", () => {
     ).toBe(false);
     // A Cyrillic layout still copies with the physical C key.
     expect(isHostShortcut(keys({ key: "с", code: "KeyC", ctrlKey: true }), "linux")).toBe(false);
+    expect(
+      isHostShortcut(keys({ key: "P", code: "KeyP", metaKey: true, isComposing: true }), "darwin"),
+    ).toBe(false);
     // Shift turns the others into different shortcuts, such as Cmd+Shift+X.
     expect(
       isHostShortcut(keys({ key: "x", code: "KeyX", metaKey: true, shiftKey: true }), "darwin"),
     ).toBe(true);
+  });
+});
+
+describe("isHostShortcut and text input", () => {
+  it("keeps AltGr characters, which Windows and Linux report as Ctrl+Alt", async () => {
+    const { isHostShortcut } = await loadEmbedHost();
+    const at = keys({ key: "@", code: "KeyQ", ctrlKey: true, altKey: true });
+    expect(isHostShortcut(at, "win32")).toBe(false);
+    expect(isHostShortcut(at, "linux")).toBe(false);
+    expect(isHostShortcut({ ...at, getModifierState: () => true }, "darwin")).toBe(false);
+    // On macOS Ctrl+Alt is never AltGr, so it stays a shortcut.
+    expect(isHostShortcut(at, "darwin")).toBe(true);
+    // Ctrl+Alt with a non-printable key is still a shortcut elsewhere.
+    expect(
+      isHostShortcut(keys({ key: "F5", code: "F5", ctrlKey: true, altKey: true }), "win32"),
+    ).toBe(true);
+  });
+
+  it("keeps caret movement and deletion with any modifier", async () => {
+    const { isHostShortcut } = await loadEmbedHost();
+    for (const key of [
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowRight",
+      "Home",
+      "End",
+      "PageUp",
+      "PageDown",
+      "Backspace",
+      "Delete",
+    ]) {
+      expect(isHostShortcut(keys({ key, code: key, metaKey: true }), "darwin"), key).toBe(false);
+      expect(
+        isHostShortcut(keys({ key, code: key, ctrlKey: true, shiftKey: true }), "win32"),
+        key,
+      ).toBe(false);
+    }
   });
 });
 
