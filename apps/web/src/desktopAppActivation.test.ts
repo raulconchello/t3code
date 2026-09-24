@@ -2,6 +2,7 @@ import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  ensureActivationProject,
   handleDesktopAppActivationRequest,
   type DesktopAppActivationDependencies,
 } from "./desktopAppActivation";
@@ -103,5 +104,86 @@ describe("desktop app activation", () => {
       message: "Project path is not available.",
     });
     expect(openThread).not.toHaveBeenCalled();
+  });
+});
+
+describe("ensureActivationProject", () => {
+  const workspace = { workspaceRoot: "/workspace/project", platform: "linux" } as const;
+
+  it("reuses a project found at an alias without adding one", async () => {
+    const deps = dependencies({
+      findProject: (_environmentId, workspaceRoot) =>
+        workspaceRoot === "/real/project"
+          ? { id: existingProjectId, environmentId, workspaceRoot }
+          : null,
+    });
+
+    const result = await ensureActivationProject(
+      { ...workspace, aliases: ["/real/project"] },
+      deps,
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      projectRef: { environmentId, projectId: existingProjectId },
+      created: false,
+    });
+    expect(deps.createProject).not.toHaveBeenCalled();
+  });
+
+  it("adds the project at the root and waits for it", async () => {
+    const deps = dependencies({ findProject: () => null });
+
+    const result = await ensureActivationProject(
+      { ...workspace, aliases: ["/real/project"] },
+      deps,
+    );
+
+    expect(deps.createProject).toHaveBeenCalledWith(environmentId, "/workspace/project");
+    expect(deps.waitForProject).toHaveBeenCalledWith({
+      environmentId,
+      projectId: createdProjectId,
+    });
+    expect(result).toEqual({
+      ok: true,
+      projectRef: { environmentId, projectId: createdProjectId },
+      created: true,
+    });
+  });
+
+  it("reports a project that never reaches the client store", async () => {
+    const result = await ensureActivationProject(
+      workspace,
+      dependencies({
+        findProject: () => null,
+        waitForProject: vi.fn(async () => {
+          throw new Error("The project did not appear in the desktop app.");
+        }),
+      }),
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      code: "project-create-failed",
+      message: "The project did not appear in the desktop app.",
+    });
+  });
+
+  it("does nothing while the environment is unavailable", async () => {
+    const deps = dependencies({ getTarget: () => null, findProject: () => null });
+
+    const result = await ensureActivationProject(workspace, deps);
+
+    expect(result).toMatchObject({ ok: false, code: "environment-unavailable" });
+    expect(deps.createProject).not.toHaveBeenCalled();
+  });
+
+  it("maps win32 to a Windows environment", async () => {
+    const result = await ensureActivationProject(
+      { workspaceRoot: "C:\\workspace\\project", platform: "win32" },
+      dependencies({ getTarget: () => ({ environmentId, platform: "windows" }) }),
+    );
+
+    expect(result).toMatchObject({ ok: true, created: false });
   });
 });
