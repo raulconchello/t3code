@@ -47,6 +47,24 @@ function hasNewProjectRequest(state: WorkspaceLockCoordinatorState): boolean {
 }
 
 /**
+ * Runs one task at a time and drops a start while one is in flight, so an
+ * effect that runs twice (as StrictMode does) cannot add the project twice.
+ * The task reports its own failures.
+ */
+export function createSingleFlight() {
+  let inFlight = false;
+  const settle = () => {
+    inFlight = false;
+  };
+  return (task: () => Promise<void>): boolean => {
+    if (inFlight) return false;
+    inFlight = true;
+    void task().then(settle, settle);
+    return true;
+  };
+}
+
+/**
  * Finding or adding the project runs on its own only the first time the
  * environment is live without it. Once it existed, or after a failure, only an
  * explicit request runs it again, so removing the project never re-adds it.

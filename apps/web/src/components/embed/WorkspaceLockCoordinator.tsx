@@ -19,6 +19,7 @@ import {
 import { useEnvironment } from "../../state/environments";
 import { environmentShell } from "../../state/shell";
 import {
+  createSingleFlight,
   resolveWorkspaceLockStatus,
   shouldPrepareWorkspaceProject,
   type WorkspaceProjectPreparation,
@@ -61,10 +62,14 @@ function LockedWorkspaceCoordinator({
   const [handledProjectRequest, setHandledProjectRequest] = useState(projectRequest);
   const [preparation, setPreparation] = useState<WorkspaceProjectPreparation>({ phase: "idle" });
   const projectWasReady = useWorkspaceProjectWasReady();
-  // Guards against a second run while one is in flight, including StrictMode's
-  // repeated effect.
-  const preparingRef = useRef(false);
+  const [startPreparation] = useState(createSingleFlight);
   const publishedStatusRef = useRef<string | null>(null);
+
+  // A failure is stale once the project exists, so a later removal reads as
+  // project-missing rather than as the old error.
+  if (projectRef !== null && preparation.phase === "failed") {
+    setPreparation({ phase: "idle" });
+  }
 
   const state = {
     connection,
@@ -79,26 +84,22 @@ function LockedWorkspaceCoordinator({
   const shouldPrepare = shouldPrepareWorkspaceProject(state);
 
   const prepareProject = useEffectEvent(async () => {
-    const result = await ensureActivationProject(
-      { workspaceRoot: lock.workspaceRoot, aliases: lock.aliases, platform: lock.platform },
-      projectDependencies,
-    );
-    setPreparation(result.ok ? { phase: "idle" } : { phase: "failed", message: result.message });
+    setHandledProjectRequest(projectRequest);
+    setPreparation({ phase: "running" });
+    try {
+      const result = await ensureActivationProject(
+        { workspaceRoot: lock.workspaceRoot, aliases: lock.aliases, platform: lock.platform },
+        projectDependencies,
+      );
+      setPreparation(result.ok ? { phase: "idle" } : { phase: "failed", message: result.message });
+    } catch {
+      setPreparation({ phase: "failed", message: "T3 Code could not add the project." });
+    }
   });
 
   useEffect(() => {
-    if (!shouldPrepare || preparingRef.current) return;
-    preparingRef.current = true;
-    setHandledProjectRequest(projectRequest);
-    setPreparation({ phase: "running" });
-    void prepareProject()
-      .catch(() =>
-        setPreparation({ phase: "failed", message: "T3 Code could not add the project." }),
-      )
-      .finally(() => {
-        preparingRef.current = false;
-      });
-  }, [projectRequest, shouldPrepare]);
+    if (shouldPrepare) startPreparation(() => prepareProject());
+  }, [shouldPrepare, startPreparation]);
 
   useEffect(() => {
     const statusKey = JSON.stringify(status);

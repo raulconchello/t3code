@@ -4,9 +4,10 @@ import {
   type SupervisorConnectionState,
 } from "@t3tools/client-runtime/connection";
 import { ProjectId } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  createSingleFlight,
   resolveWorkspaceLockStatus,
   shouldPrepareWorkspaceProject,
   type WorkspaceLockCoordinatorState,
@@ -88,5 +89,35 @@ describe("workspace lock coordinator", () => {
       phase: "error",
       message: "blocked: unsupported",
     });
+  });
+});
+
+describe("createSingleFlight", () => {
+  it("drops a second start while the first is in flight", async () => {
+    const start = createSingleFlight();
+    let resolve = () => {};
+    const promise = new Promise<void>((settle) => {
+      resolve = settle;
+    });
+    const task = vi.fn(() => promise);
+
+    expect(start(task)).toBe(true);
+    expect(start(task)).toBe(false);
+    expect(task).toHaveBeenCalledOnce();
+
+    resolve();
+    await promise;
+    await Promise.resolve();
+    expect(start(async () => {})).toBe(true);
+  });
+
+  it("allows a new start after a task fails", async () => {
+    const start = createSingleFlight();
+    const failure = Promise.reject(new Error("boom"));
+
+    expect(start(() => failure)).toBe(true);
+    await failure.catch(() => undefined);
+    await Promise.resolve();
+    expect(start(async () => {})).toBe(true);
   });
 });
