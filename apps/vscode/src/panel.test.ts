@@ -136,11 +136,45 @@ describe("webview relay", () => {
     assert.deepEqual(relay.toExtension, []);
   });
 
-  it("never replays plain typing", () => {
+  it("takes key and keyCode from the code, not from the message", () => {
+    relay.fromFrame(keydown({ key: "Enter", code: "KeyW", keyCode: 13, shiftKey: false }));
+    relay.fromFrame(
+      keydown({
+        key: "x",
+        code: "Backquote",
+        keyCode: 0,
+        metaKey: false,
+        ctrlKey: true,
+        shiftKey: false,
+      }),
+    );
+
+    assert.deepEqual(
+      relay.replayed.map(({ key, code, keyCode }) => ({ key, code, keyCode })),
+      [
+        { key: "w", code: "KeyW", keyCode: 87 },
+        { key: "`", code: "Backquote", keyCode: 192 },
+      ],
+    );
+  });
+
+  it("never replays plain typing or keys outside the shortcut set", () => {
     relay.fromFrame(
       keydown({ key: "a", code: "KeyA", keyCode: 65, metaKey: false, shiftKey: false }),
     );
-    relay.fromFrame(keydown({ key: "Enter", code: "Enter", keyCode: 13, metaKey: false }));
+    relay.fromFrame(keydown({ code: "KeyA", metaKey: "true" }));
+    for (const code of [
+      "Enter",
+      "Space",
+      "Tab",
+      "ArrowUp",
+      "Backspace",
+      "Numpad1",
+      "__proto__",
+      42,
+    ]) {
+      relay.fromFrame(keydown({ code, ctrlKey: true, metaKey: true }));
+    }
     assert.deepEqual(relay.replayed, []);
   });
 });
