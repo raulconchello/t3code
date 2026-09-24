@@ -10,6 +10,7 @@ import type {
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 
 import { EMBED_HOST_BUILD, readEmbedHost } from "./embedHost";
+import type { FileRoutesById } from "./routeTree.gen";
 
 /**
  * `isWorkspaceLocked`: whether the app runs under a workspace lock. Every
@@ -153,26 +154,31 @@ export function lockShellSnapshot(
   };
 }
 
-/** Pages that list or add other projects and environments. */
-const LOCKED_OUT_PATHS = [
-  "/pull-requests",
+/**
+ * Routes that list or add other projects and environments, or show what runs
+ * outside the workspace. Matched by route id rather than by pathname, since
+ * the router matches paths case-insensitively.
+ */
+const LOCKED_OUT_ROUTE_IDS: ReadonlySet<string> = new Set<keyof FileRoutesById>([
+  "/_chat/pull-requests",
   "/usage",
   "/welcome",
   "/settings/connections",
+  "/settings/diagnostics",
   "/pair",
   "/connect",
-] as const;
+]);
 
-/** Where to send a navigation that would leave the lock, or null to let it through. */
+/**
+ * Where to send a navigation that would leave the lock, or null to let it
+ * through. `routeIds` are the ids of every route the navigation matched.
+ */
 export function resolveLockedRouteRedirect(
-  pathname: string,
+  routeIds: ReadonlyArray<string>,
   lock: WorkspaceLock | null,
 ): "/" | null {
   if (lock === null) return null;
-  const lockedOut = LOCKED_OUT_PATHS.some(
-    (path) => pathname === path || pathname.startsWith(`${path}/`),
-  );
-  return lockedOut ? "/" : null;
+  return routeIds.some((routeId) => LOCKED_OUT_ROUTE_IDS.has(routeId)) ? "/" : null;
 }
 
 /**

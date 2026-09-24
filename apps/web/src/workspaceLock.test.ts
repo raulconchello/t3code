@@ -6,6 +6,14 @@ import {
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
+import {
+  type AnyRoute,
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  redirect,
+} from "@tanstack/react-router";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -178,21 +186,68 @@ describe("lockShellSnapshot", () => {
 describe("locked routes", () => {
   const lock = lockFor("/work/app");
 
-  it("sends pages that span projects or environments home", () => {
+  // A small tree shaped like the app's, so ids and case-insensitive matching
+  // come from the real router.
+  async function landingPath(pathname: string, routeLock: typeof lock | null = lock) {
+    const rootRoute = createRootRoute({
+      beforeLoad: ({ matches }) => {
+        const target = resolveLockedRouteRedirect(
+          matches.map((match) => match.routeId),
+          routeLock,
+        );
+        if (target !== null) throw redirect({ to: target, replace: true });
+      },
+    });
+    const child = (parent: AnyRoute, path: string) =>
+      createRoute({ getParentRoute: () => parent, path });
+    const settings = child(rootRoute, "settings");
+    const chat = createRoute({ getParentRoute: () => rootRoute, id: "_chat" });
+    const routeTree = rootRoute.addChildren([
+      child(rootRoute, "/"),
+      child(rootRoute, "usage"),
+      child(rootRoute, "welcome"),
+      child(rootRoute, "pair"),
+      child(rootRoute, "connect"),
+      settings.addChildren(
+        ["connections", "diagnostics", "general", "archived"].map((path) => child(settings, path)),
+      ),
+      chat.addChildren([child(chat, "pull-requests"), child(chat, "draft/$draftId")]),
+    ]);
+    // Without a document the router runs as on a server: it records each
+    // redirect (including its own trailing-slash one) instead of following it.
+    let current = pathname;
+    for (let hop = 0; hop < 3; hop++) {
+      const router = createRouter({
+        routeTree,
+        history: createMemoryHistory({ initialEntries: [current] }),
+      });
+      await router.load();
+      const next = router.state.redirect?.options.href;
+      if (next === undefined) return router.state.location.pathname;
+      current = next;
+    }
+    return current;
+  }
+
+  it("sends pages that span projects or environments home, in any letter case", async () => {
     for (const pathname of [
       "/pull-requests",
       "/usage",
+      "/Usage",
       "/welcome",
       "/settings/connections",
+      "/Settings/Connections",
+      "/settings/connections/",
+      "/SETTINGS/DIAGNOSTICS",
       "/pair",
       "/connect",
     ]) {
-      expect(resolveLockedRouteRedirect(pathname, lock)).toBe("/");
+      expect(await landingPath(pathname), pathname).toBe("/");
     }
-    for (const pathname of ["/", "/settings/general", "/settings/archived", "/draft/d1"]) {
-      expect(resolveLockedRouteRedirect(pathname, lock)).toBeNull();
+    for (const pathname of ["/settings/general", "/Settings/Archived", "/draft/d1"]) {
+      expect(await landingPath(pathname), pathname).toBe(pathname);
     }
-    expect(resolveLockedRouteRedirect("/usage", null)).toBeNull();
+    expect(await landingPath("/Usage", null)).toBe("/Usage");
   });
 
   it("sends threads on other environments home right away", () => {
