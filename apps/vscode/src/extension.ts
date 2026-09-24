@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off -- VS Code extension host glue around plain Node APIs.
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -43,6 +44,11 @@ declare const __T3CODE_WEB_VERSION__: string;
 const CONSENT_KEY = "t3code.pairingConsent";
 /** SecretStorage keys holding bearer tokens, so Disconnect can find them without a server. */
 const SECRET_KEYS_KEY = "t3code.bearerSecretKeys";
+/**
+ * Changes on every Disconnect. Panels remember the one they opened in, so a
+ * panel saved before a Disconnect closes when VS Code restores it, in any window.
+ */
+const GENERATION_KEY = "t3code.pairingGeneration";
 const portKey = (folderKey: string) => `t3code.port:${folderKey}`;
 
 /** Resolved by the web app's own status messages, for the VS Code smoke test. */
@@ -123,13 +129,14 @@ class FolderSession implements vscode.Disposable {
   constructor(
     folder: vscode.WorkspaceFolder,
     panel: vscode.WebviewPanel,
+    generation: string,
     handlers: FolderSessionHandlers,
   ) {
     this.folder = folder;
     this.handlers = handlers;
     this.view = new WorkspacePanel(
       panel,
-      { folderUri: folder.uri.toString() },
+      { folderUri: folder.uri.toString(), generation },
       {
         onFrameMessage: (message) => handlers.onFrameMessage(this, message),
         onAction: (id) => handlers.onAction(this, id),
@@ -213,7 +220,13 @@ class T3CodeController implements vscode.Disposable {
     const folder = isPanelState(state)
       ? vscode.workspace.workspaceFolders?.find((item) => item.uri.toString() === state.folderUri)
       : undefined;
-    if (!folder || vscode.env.remoteName || this.sessions.has(folder.uri.toString())) {
+    const disconnectedSince = isPanelState(state) && state.generation !== this.generation();
+    if (
+      !folder ||
+      disconnectedSince ||
+      vscode.env.remoteName ||
+      this.sessions.has(folder.uri.toString())
+    ) {
       panel.dispose();
       return;
     }
@@ -257,6 +270,9 @@ class T3CodeController implements vscode.Disposable {
 
   async disconnect(): Promise<void> {
     for (const session of this.sessions.values()) session.dispose();
+    // Tabs VS Code hasn't restored yet close too; the new generation covers other windows.
+    await this.context.globalState.update(GENERATION_KEY, newGeneration());
+    await vscode.window.tabGroups.close(t3CodeTabs());
     this.connectionEpoch += 1;
     this.connection = null;
     this.pendingConnection = null;
@@ -282,9 +298,18 @@ class T3CodeController implements vscode.Disposable {
 
   // ---- Sessions ----
 
+  /** The current pairing generation, created on first use. */
+  private generation(): string {
+    const current = this.context.globalState.get<string>(GENERATION_KEY);
+    if (current) return current;
+    const generation = newGeneration();
+    void this.context.globalState.update(GENERATION_KEY, generation);
+    return generation;
+  }
+
   private createSession(folder: vscode.WorkspaceFolder, panel: vscode.WebviewPanel) {
     panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, "resources", "icon.png");
-    const session = new FolderSession(folder, panel, {
+    const session = new FolderSession(folder, panel, this.generation(), {
       onFrameMessage: (target, message) => void this.onFrameMessage(target, message),
       onAction: (target, id) => void this.onAction(target, id),
       onDispose: (target) => {
@@ -827,6 +852,20 @@ function toHostError(error: unknown): HostError {
   }
   return new HostError("Couldn't connect to T3 Code.", errorText(error), [RETRY, PASTE_TOKEN]);
 }
+
+const newGeneration = () => NodeCrypto.randomBytes(8).toString("hex");
+
+/** Every T3 Code tab in this window, including ones VS Code hasn't restored yet. */
+const t3CodeTabs = () =>
+  vscode.window.tabGroups.all
+    .flatMap((group) => group.tabs)
+    .filter(
+      (tab) =>
+        tab.input instanceof vscode.TabInputWebview &&
+        // VS Code reports extension webviews with a "mainThreadWebview-" prefix.
+        (tab.input.viewType === WEBVIEW_TYPE ||
+          tab.input.viewType === `mainThreadWebview-${WEBVIEW_TYPE}`),
+    );
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

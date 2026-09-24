@@ -13,6 +13,8 @@ export const WEBVIEW_TYPE = "t3code.workspace";
 /** Persisted by the webview itself so the serializer can find the folder again. */
 export interface PanelState {
   readonly folderUri: string;
+  /** The pairing generation the panel was opened in; Disconnect starts a new one. */
+  readonly generation?: string;
 }
 
 export const isPanelState = (value: unknown): value is PanelState =>

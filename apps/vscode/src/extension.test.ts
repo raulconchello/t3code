@@ -7,7 +7,15 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { afterEach, assert, beforeEach, describe, it, vi } from "vite-plus/test";
 import type * as vscodeTypes from "vscode";
 
-import { type FakeFolder, type FakePanel, Uri, fake, window } from "../test/fakeVscode.ts";
+import {
+  type FakeFolder,
+  FakePanel,
+  TabInputText,
+  TabInputWebview,
+  Uri,
+  fake,
+  window,
+} from "../test/fakeVscode.ts";
 import type { DesktopServer, DesktopServerDiscovery } from "./desktopServer.ts";
 import type { StaticServer } from "./staticServer.ts";
 
@@ -308,8 +316,10 @@ describe("pairing", () => {
     };
 
     const restoredPanel = window.createWebviewPanel("t3code.workspace", "");
+    globalState.set("t3code.pairingGeneration", "saved");
     const restoring = fake.serializer!.deserializeWebviewPanel(restoredPanel, {
       folderUri: restoredFolder.uri.toString(),
+      generation: "saved",
     });
     await flush();
     const opening = openFolder(openedFolder);
@@ -359,6 +369,48 @@ describe("pairing", () => {
     io.mint = async () => `pairing-${++mints}`;
     await openFolder(folder);
     assert.equal(mints, 2, "the next open pairs again instead of reusing the old attempt");
+  });
+});
+
+describe("Disconnect and saved panels", () => {
+  /** The state a panel's page saved, which VS Code hands back on restore. */
+  const savedState = (panel: FakePanel): unknown =>
+    JSON.parse(/vscode\.setState\((\{[^)]*\})\)/.exec(panel.webview.html)?.[1] ?? "null");
+
+  it("closes T3 Code tabs VS Code hasn't restored yet, and only those", async () => {
+    const readme = { label: "README.md", input: new TabInputText(Uri.file("/work/README.md")) };
+    const unrestored = {
+      label: "T3 Code: app",
+      input: new TabInputWebview("mainThreadWebview-t3code.workspace"),
+    };
+    fake.tabs.push(readme, unrestored);
+
+    await fake.execute("t3code.disconnect");
+
+    assert.deepEqual(fake.tabs, [readme]);
+  });
+
+  it("closes a panel saved before Disconnect when it is restored, but not a newer one", async () => {
+    makeStaticServers();
+    const folder = fake.addFolder("/work/app", "app");
+    grantConsent();
+    await openFolder(folder);
+    const stale = savedState(fake.panels[0]!);
+
+    await fake.execute("t3code.disconnect");
+    grantConsent();
+    await openFolder(folder);
+    const current = savedState(fake.panels.at(-1)!);
+    fake.panels.at(-1)?.dispose();
+
+    const restoredStale = new FakePanel();
+    await fake.serializer!.deserializeWebviewPanel(restoredStale, stale);
+    const restoredCurrent = new FakePanel();
+    await fake.serializer!.deserializeWebviewPanel(restoredCurrent, current);
+
+    assert.isTrue(restoredStale.disposed);
+    assert.isFalse(restoredCurrent.disposed);
+    assert.property(pageOf(restoredCurrent), "app");
   });
 });
 

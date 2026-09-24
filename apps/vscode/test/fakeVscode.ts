@@ -49,6 +49,27 @@ export class ThemeColor {
   }
 }
 
+export class TabInputWebview {
+  readonly viewType: string;
+  constructor(viewType: string) {
+    this.viewType = viewType;
+  }
+}
+
+export class TabInputText {
+  readonly uri: Uri;
+  constructor(uri: Uri) {
+    this.uri = uri;
+  }
+}
+
+/** An editor tab; `panel` is set once its webview exists (VS Code restores lazily). */
+export interface FakeTab {
+  readonly label: string;
+  readonly input: unknown;
+  readonly panel?: FakePanel;
+}
+
 export const StatusBarAlignment = { Left: 1, Right: 2 } as const;
 export const ViewColumn = { Active: -1 } as const;
 export const ExtensionMode = { Production: 1, Development: 2, Test: 3 } as const;
@@ -100,6 +121,7 @@ export class FakePanel {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    fake.tabs = fake.tabs.filter((tab) => tab.panel !== this);
     this.disposeEmitter.fire();
   }
 }
@@ -121,6 +143,7 @@ export const fake = {
   folders: [] as FakeFolder[],
   config: new Map<string, unknown>(),
   panels: [] as FakePanel[],
+  tabs: [] as FakeTab[],
   serializer: null as PanelSerializer | null,
   /** The button the user picks in the consent modal. */
   consentAnswer: undefined as string | undefined,
@@ -138,6 +161,7 @@ export const fake = {
     this.folders = [];
     this.config.clear();
     this.panels = [];
+    this.tabs = [];
     this.serializer = null;
     this.consentAnswer = undefined;
     this.modalPrompts = 0;
@@ -178,11 +202,26 @@ export const window = {
     hide() {},
     dispose() {},
   }),
-  createWebviewPanel: (_viewType: string, title: string) => {
+  createWebviewPanel: (viewType: string, title: string) => {
     const panel = new FakePanel();
     panel.title = title;
     fake.panels.push(panel);
+    fake.tabs.push({
+      label: title,
+      input: new TabInputWebview(`mainThreadWebview-${viewType}`),
+      panel,
+    });
     return panel;
+  },
+  tabGroups: {
+    get all() {
+      return [{ tabs: fake.tabs }];
+    },
+    close: async (tabs: ReadonlyArray<FakeTab>) => {
+      fake.tabs = fake.tabs.filter((tab) => !tabs.includes(tab));
+      for (const tab of tabs) tab.panel?.dispose();
+      return true;
+    },
   },
   registerWebviewPanelSerializer: (_viewType: string, serializer: PanelSerializer) => {
     fake.serializer = serializer;
