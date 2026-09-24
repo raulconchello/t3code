@@ -45,10 +45,30 @@ const isFile = (filePath: string) => {
   }
 };
 
+const canonicalPath = (filePath: string) => {
+  try {
+    return NodeFS.realpathSync.native(filePath);
+  } catch {
+    return null;
+  }
+};
+
+const isInside = (root: string, filePath: string) =>
+  filePath === root || filePath.startsWith(`${root}${NodePath.sep}`);
+
+/** A file's real path when it is a regular file really inside `realRoot`. */
+const containedFile = (realRoot: string, filePath: string): StaticResolution => {
+  const real = canonicalPath(filePath);
+  if (real === null) return { _tag: "NotFound" };
+  // Serving follows links, so a link that leads out of the root is refused.
+  if (!isInside(realRoot, real)) return { _tag: "Invalid" };
+  return isFile(real) ? { _tag: "File", filePath: real } : { _tag: "NotFound" };
+};
+
 /**
- * Maps a request path onto a file under `root`. Paths that escape the root are
- * invalid; extensionless paths that match no file fall back to index.html so
- * client-side routes load the app.
+ * Maps a request path onto a file under `root`. Paths that escape the root,
+ * by `..` or through a symlink, are invalid; extensionless paths that match no
+ * file fall back to index.html so client-side routes load the app.
  */
 export function resolveStaticPath(root: string, requestPath: string): StaticResolution {
   let decoded: string;
@@ -67,16 +87,18 @@ export function resolveStaticPath(root: string, requestPath: string): StaticReso
 
   const resolvedRoot = NodePath.resolve(root);
   const candidate = NodePath.resolve(resolvedRoot, ...segments);
-  if (candidate !== resolvedRoot && !candidate.startsWith(`${resolvedRoot}${NodePath.sep}`)) {
+  if (!isInside(resolvedRoot, candidate)) {
     return { _tag: "Invalid" };
   }
+  const realRoot = canonicalPath(resolvedRoot);
+  if (realRoot === null) return { _tag: "NotFound" };
 
-  if (segments.length > 0 && isFile(candidate)) {
-    return { _tag: "File", filePath: candidate };
+  if (segments.length > 0) {
+    const file = containedFile(realRoot, candidate);
+    if (file._tag !== "NotFound") return file;
   }
-  const indexPath = NodePath.join(resolvedRoot, "index.html");
-  if (NodePath.extname(candidate) === "" && isFile(indexPath)) {
-    return { _tag: "File", filePath: indexPath };
+  if (NodePath.extname(candidate) === "") {
+    return containedFile(realRoot, NodePath.join(resolvedRoot, "index.html"));
   }
   return { _tag: "NotFound" };
 }
@@ -93,7 +115,8 @@ function createStaticRequestHandler(input: {
   /** The port the server listens on, for the Host header check. */
   readonly port: () => number;
 }): NodeHttp.RequestListener {
-  const root = NodePath.resolve(input.root);
+  // Resolved files are real paths, so cache rules compare against the real root.
+  const root = canonicalPath(input.root) ?? NodePath.resolve(input.root);
   const sendText = (response: NodeHttp.ServerResponse, status: number, text: string) => {
     response.writeHead(status, {
       "Content-Type": "text/plain; charset=utf-8",

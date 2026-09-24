@@ -13,7 +13,9 @@ let root: string;
 let server: StaticServer;
 
 beforeAll(async () => {
-  sandbox = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-vscode-static-"));
+  sandbox = NodeFS.realpathSync(
+    NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-vscode-static-")),
+  );
   root = NodePath.join(sandbox, "web");
   NodeFS.mkdirSync(NodePath.join(root, "assets"), { recursive: true });
   NodeFS.writeFileSync(NodePath.join(root, "index.html"), "<!doctype html><title>app</title>");
@@ -21,6 +23,15 @@ beforeAll(async () => {
   NodeFS.writeFileSync(NodePath.join(root, "assets", "ghostty-abc12345.wasm"), "\0asm");
   NodeFS.writeFileSync(NodePath.join(root, "favicon.ico"), "icon");
   NodeFS.writeFileSync(NodePath.join(sandbox, "secret.txt"), "secret");
+  NodeFS.mkdirSync(NodePath.join(sandbox, "private"));
+  NodeFS.writeFileSync(NodePath.join(sandbox, "private", "notes.js"), "secret");
+  // Links inside the root: one to its own file, two that lead out of it.
+  NodeFS.symlinkSync(
+    NodePath.join(root, "assets", "index-abc12345.js"),
+    NodePath.join(root, "assets", "alias-abc12345.js"),
+  );
+  NodeFS.symlinkSync(NodePath.join(sandbox, "secret.txt"), NodePath.join(root, "leak.txt"));
+  NodeFS.symlinkSync(NodePath.join(sandbox, "private"), NodePath.join(root, "linked"));
   server = await startStaticServer({ root });
 });
 
@@ -116,6 +127,17 @@ describe("static server", () => {
     }
   });
 
+  it("refuses symlinks that lead out of the web root", async () => {
+    for (const path of ["/leak.txt", "/linked/notes.js", "/linked"]) {
+      const response = await request(path);
+      assert.equal(response.status, 400, path);
+      assert.notInclude(response.body, "secret", path);
+    }
+    const alias = await request("/assets/alias-abc12345.js");
+    assert.equal(alias.status, 200);
+    assert.equal(alias.body, "console.log(1);");
+  });
+
   it("only answers requests addressed to its exact loopback origin", async () => {
     assert.equal((await request("/", { host: `localhost:${server.port}` })).status, 403);
     assert.equal((await request("/", { host: "attacker.example" })).status, 403);
@@ -156,6 +178,20 @@ describe("static server", () => {
 });
 
 describe("resolveStaticPath", () => {
+  it("refuses an index.html that links out of the root, and serves through a linked root", () => {
+    const linkedRoot = NodePath.join(sandbox, "linked-web");
+    NodeFS.symlinkSync(root, linkedRoot);
+    assert.deepEqual(resolveStaticPath(linkedRoot, "/threads/1"), {
+      _tag: "File",
+      filePath: NodePath.join(root, "index.html"),
+    });
+
+    const hostile = NodePath.join(sandbox, "hostile-web");
+    NodeFS.mkdirSync(hostile);
+    NodeFS.symlinkSync(NodePath.join(sandbox, "secret.txt"), NodePath.join(hostile, "index.html"));
+    assert.deepEqual(resolveStaticPath(hostile, "/threads/1"), { _tag: "Invalid" });
+  });
+
   it("keeps every resolved file inside the root", () => {
     assert.deepEqual(resolveStaticPath(root, "/assets/index-abc12345.js"), {
       _tag: "File",
