@@ -89,12 +89,44 @@ ${input.script}
 };
 
 /**
+ * The keys a replayed shortcut may use, by `KeyboardEvent.code`, with the key
+ * and keyCode the relay gives them (US layout, as VS Code's keybindings expect).
+ */
+const SHORTCUT_KEYS: ReadonlyArray<readonly [code: string, key: string, keyCode: number]> = [
+  ...Array.from({ length: 26 }, (_, index) => {
+    const letter = String.fromCharCode(97 + index);
+    return [`Key${letter.toUpperCase()}`, letter, 65 + index] as const;
+  }),
+  ...Array.from(
+    { length: 10 },
+    (_, digit) => [`Digit${digit}`, String(digit), 48 + digit] as const,
+  ),
+  ...Array.from(
+    { length: 12 },
+    (_, index) => [`F${index + 1}`, `F${index + 1}`, 112 + index] as const,
+  ),
+  ["Minus", "-", 189],
+  ["Equal", "=", 187],
+  ["BracketLeft", "[", 219],
+  ["BracketRight", "]", 221],
+  ["Backslash", "\\", 220],
+  ["Semicolon", ";", 186],
+  ["Quote", "'", 222],
+  ["Backquote", "`", 192],
+  ["Comma", ",", 188],
+  ["Period", ".", 190],
+  ["Slash", "/", 191],
+];
+
+/**
  * The app page: a full-size iframe on the local static server plus a relay.
  * Frame messages are forwarded only from that iframe and its exact origin;
  * extension messages are forwarded only to that origin. A shortcut the app
  * passes on (`t3code/keydown`) is replayed as a keydown on this page instead:
  * VS Code's webview forwards this page's keydowns to the workbench, which runs
- * the matching keybinding. Only shortcuts are replayed, never plain typing.
+ * the matching keybinding. Only a well-formed shortcut is replayed: a known
+ * key (SHORTCUT_KEYS) with Ctrl or Cmd, or a function key. Its key and keyCode
+ * come from that table, never from the message.
  */
 export function renderAppHtml(input: {
   readonly nonce: string;
@@ -110,14 +142,17 @@ export function renderAppHtml(input: {
   const appOrigin = ${scriptJson(input.appOrigin)};
   const frame = document.getElementById("app");
   vscode.setState(${scriptJson(input.state)});
+  const shortcutKeys = new Map(${scriptJson(SHORTCUT_KEYS.map(([code, key, keyCode]) => [code, [key, keyCode]]))});
   const replayShortcut = (data) => {
-    const key = String(data.key);
+    const known = typeof data.code === "string" ? shortcutKeys.get(data.code) : undefined;
+    if (!known) return;
+    const [key, keyCode] = known;
     const modified = data.ctrlKey === true || data.metaKey === true;
-    if (!modified && !/^F(?:[1-9]|1[0-2])$/.test(key)) return;
+    if (!modified && !/^F(?:[1-9]|1[0-2])$/.test(data.code)) return;
     window.dispatchEvent(new KeyboardEvent("keydown", {
-      key,
-      code: String(data.code),
-      keyCode: Number(data.keyCode) || 0,
+      key: data.shiftKey === true && key.length === 1 ? key.toUpperCase() : key,
+      code: data.code,
+      keyCode,
       altKey: data.altKey === true,
       ctrlKey: data.ctrlKey === true,
       metaKey: data.metaKey === true,

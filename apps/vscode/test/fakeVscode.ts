@@ -150,8 +150,8 @@ export const fake = {
   modalPrompts: 0,
   /** Picks an item in a quick pick; the default dismisses it. */
   pick: undefined as ((items: ReadonlyArray<unknown>) => unknown) | undefined,
-  /** The text typed into an input box; undefined dismisses it. */
-  inputAnswer: undefined as string | undefined,
+  /** The text typed into an input box, possibly later; undefined dismisses it. */
+  inputAnswer: undefined as string | Promise<string | undefined> | undefined,
   /** The button the user picks in a warning; undefined dismisses it. */
   warningAnswer: undefined as string | undefined,
   warnings: [] as string[],
@@ -245,7 +245,7 @@ export const window = {
     return undefined;
   },
   showQuickPick: async (items: ReadonlyArray<unknown>) => fake.pick?.(items),
-  showInputBox: async () => fake.inputAnswer,
+  showInputBox: async () => await fake.inputAnswer,
 };
 
 export const commands = {

@@ -439,6 +439,30 @@ describe("manual pairing", () => {
     assert.equal(fake.modalPrompts, 1, "the next open asks for consent again");
     assert.deepEqual(pageOf(fake.panels.at(-1)!), { message: "Connect VS Code to T3 Code." });
   });
+  it("a link submitted in a prompt opened before Disconnect doesn't pair", async () => {
+    makeStaticServers();
+    const folder = fake.addFolder("/work/app", "app");
+    const exchanged: string[] = [];
+    io.exchange = async (credential) => {
+      exchanged.push(credential);
+      return `bearer-for-${credential}`;
+    };
+    const typing = gate();
+    fake.pick = (items) => items.find((item) => (item as { id: string }).id === "paste");
+    fake.inputAnswer = typing.promise.then(() => "http://127.0.0.1:3773/pair#token=LATE");
+
+    const connecting = fake.execute("t3code.connect");
+    await flush();
+    await fake.execute("t3code.disconnect");
+    typing.open();
+    await connecting;
+    await flush();
+
+    assert.deepEqual(exchanged, []);
+    assert.equal(secrets.size, 0);
+    await openFolder(folder);
+    assert.deepEqual(pageOf(fake.panels.at(-1)!), { message: "Connect VS Code to T3 Code." });
+  });
 });
 
 describe("a desktop server that moved", () => {

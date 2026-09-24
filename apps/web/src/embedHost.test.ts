@@ -166,7 +166,12 @@ interface KeyInit {
   readonly ctrlKey?: boolean;
   readonly metaKey?: boolean;
   readonly shiftKey?: boolean;
+  readonly isComposing?: boolean;
+  readonly altGraph?: boolean;
 }
+
+const modifierState = (init: KeyInit) => (modifier: string) =>
+  modifier === "AltGraph" && init.altGraph === true;
 
 function keydown(init: KeyInit) {
   const event = new Event("keydown", { cancelable: true });
@@ -179,7 +184,8 @@ function keydown(init: KeyInit) {
     metaKey: { value: init.metaKey ?? false },
     shiftKey: { value: init.shiftKey ?? false },
     repeat: { value: false },
-    isComposing: { value: false },
+    isComposing: { value: init.isComposing ?? false },
+    getModifierState: { value: modifierState(init) },
   });
   return event;
 }
@@ -190,7 +196,9 @@ const keys = (init: KeyInit) => ({
   ctrlKey: false,
   metaKey: false,
   shiftKey: false,
+  isComposing: false,
   ...init,
+  getModifierState: modifierState(init),
 });
 
 describe("isHostShortcut", () => {
@@ -225,10 +233,51 @@ describe("isHostShortcut", () => {
     ).toBe(false);
     // A Cyrillic layout still copies with the physical C key.
     expect(isHostShortcut(keys({ key: "с", code: "KeyC", ctrlKey: true }), "linux")).toBe(false);
+    expect(
+      isHostShortcut(keys({ key: "P", code: "KeyP", metaKey: true, isComposing: true }), "darwin"),
+    ).toBe(false);
     // Shift turns the others into different shortcuts, such as Cmd+Shift+X.
     expect(
       isHostShortcut(keys({ key: "x", code: "KeyX", metaKey: true, shiftKey: true }), "darwin"),
     ).toBe(true);
+  });
+});
+
+describe("isHostShortcut and text input", () => {
+  it("keeps AltGr characters, which Windows and Linux report as Ctrl+Alt", async () => {
+    const { isHostShortcut } = await loadEmbedHost();
+    const at = keys({ key: "@", code: "KeyQ", ctrlKey: true, altKey: true });
+    expect(isHostShortcut(at, "win32")).toBe(false);
+    expect(isHostShortcut(at, "linux")).toBe(false);
+    expect(isHostShortcut({ ...at, getModifierState: () => true }, "darwin")).toBe(false);
+    // On macOS Ctrl+Alt is never AltGr, so it stays a shortcut.
+    expect(isHostShortcut(at, "darwin")).toBe(true);
+    // Ctrl+Alt with a non-printable key is still a shortcut elsewhere.
+    expect(
+      isHostShortcut(keys({ key: "F5", code: "F5", ctrlKey: true, altKey: true }), "win32"),
+    ).toBe(true);
+  });
+
+  it("keeps caret movement and deletion with any modifier", async () => {
+    const { isHostShortcut } = await loadEmbedHost();
+    for (const key of [
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowRight",
+      "Home",
+      "End",
+      "PageUp",
+      "PageDown",
+      "Backspace",
+      "Delete",
+    ]) {
+      expect(isHostShortcut(keys({ key, code: key, metaKey: true }), "darwin"), key).toBe(false);
+      expect(
+        isHostShortcut(keys({ key, code: key, ctrlKey: true, shiftKey: true }), "win32"),
+        key,
+      ).toBe(false);
+    }
   });
 });
 
@@ -273,5 +322,87 @@ describe("host shortcut forwarding", () => {
     await afterDispatch();
 
     expect(frame.parent.postMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("reserved host shortcuts", () => {
+  it("are the Command Palette, Quick Open and F1, with the platform's modifier", async () => {
+    const { isReservedHostShortcut } = await loadEmbedHost();
+    const palette = keys({ key: "P", code: "KeyP", metaKey: true, shiftKey: true });
+    const quickOpen = keys({ key: "p", code: "KeyP", metaKey: true });
+    expect(isReservedHostShortcut(palette, "darwin")).toBe(true);
+    expect(isReservedHostShortcut(quickOpen, "darwin")).toBe(true);
+    expect(isReservedHostShortcut(keys({ key: "F1", code: "F1" }), "darwin")).toBe(true);
+    expect(
+      isReservedHostShortcut(
+        keys({ key: "P", code: "KeyP", ctrlKey: true, shiftKey: true }),
+        "win32",
+      ),
+    ).toBe(true);
+    expect(isReservedHostShortcut(keys({ key: "p", code: "KeyP", ctrlKey: true }), "linux")).toBe(
+      true,
+    );
+    // A Cyrillic layout still means the physical P key.
+    expect(isReservedHostShortcut(keys({ key: "з", code: "KeyP", ctrlKey: true }), "linux")).toBe(
+      true,
+    );
+
+    expect(isReservedHostShortcut(palette, "linux")).toBe(false);
+    expect(isReservedHostShortcut(keys({ key: "p", code: "KeyP", ctrlKey: true }), "darwin")).toBe(
+      false,
+    );
+    expect(
+      isReservedHostShortcut(
+        keys({ key: "π", code: "KeyP", metaKey: true, altKey: true }),
+        "darwin",
+      ),
+    ).toBe(false);
+    expect(isReservedHostShortcut(keys({ key: "F1", code: "F1", shiftKey: true }), "darwin")).toBe(
+      false,
+    );
+    expect(isReservedHostShortcut(keys({ key: "k", code: "KeyK", metaKey: true }), "darwin")).toBe(
+      false,
+    );
+    expect(isReservedHostShortcut({ ...palette, isComposing: true }, "darwin")).toBe(false);
+  });
+
+  it("go to the host before any of the app's handlers see them", async () => {
+    const frame = new FakeFrame();
+    await connect(frame);
+    // The app's own shortcut listeners, such as the one that pins a thread on Cmd+Shift+P.
+    const appHandlers: string[] = [];
+    frame.addEventListener("keydown", () => appHandlers.push("capture"), true);
+    frame.addEventListener("keydown", () => appHandlers.push("bubble"));
+    frame.parent.postMessage.mockClear();
+
+    const event = keydown({ key: "P", code: "KeyP", keyCode: 80, metaKey: true, shiftKey: true });
+    frame.dispatchEvent(event);
+
+    expect(appHandlers).toEqual([]);
+    expect(event.defaultPrevented).toBe(true);
+    expect(frame.parent.postMessage).toHaveBeenCalledOnce();
+    expect(frame.parent.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "t3code/keydown",
+        code: "KeyP",
+        metaKey: true,
+        shiftKey: true,
+      }),
+      HOST_ORIGIN,
+    );
+  });
+
+  it("leave the app's other shortcuts to the app", async () => {
+    const frame = new FakeFrame();
+    await connect(frame);
+    const appHandlers: string[] = [];
+    frame.addEventListener("keydown", (event) => {
+      appHandlers.push((event as KeyboardEvent).key);
+      event.preventDefault();
+    });
+
+    frame.dispatchEvent(keydown({ key: "k", code: "KeyK", metaKey: true }));
+
+    expect(appHandlers).toEqual(["k"]);
   });
 });

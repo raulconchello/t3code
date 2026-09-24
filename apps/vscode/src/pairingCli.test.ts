@@ -228,6 +228,7 @@ describe("findServerCli", () => {
       ...base,
       serverCommand: [cli.command, ...cli.args],
       platform: "linux",
+      searchPath: "",
       readVersion: async (candidate) => {
         checked.push(candidate);
         return "0.0.42";
@@ -235,6 +236,62 @@ describe("findServerCli", () => {
     });
     assert.deepEqual(found.cli, cli);
     assert.deepEqual(checked, [cli]);
+  });
+
+  it.runIf(HostProcessPlatform.defaultValue() !== "win32")(
+    "resolves a bare serverCommand on PATH once and launches that file for the mint too",
+    async () => {
+      const home = tempDir("t3code-vscode-path-");
+      const log = NodePath.join(home, "runs.log");
+      const later = NodePath.join(home, "later-bin");
+      const first = NodePath.join(home, "bin");
+      for (const [dir, version] of [
+        [first, "0.0.42"],
+        [later, "0.0.43"],
+      ] as const) {
+        NodeFS.mkdirSync(dir);
+        const script = NodePath.join(dir, "t3dev.mjs");
+        writeFakeCli(script, { version, credential: `FROM-${version}`, log });
+        NodeFS.writeFileSync(
+          script,
+          `#!${process.execPath}\n${NodeFS.readFileSync(script, "utf8")}`,
+        );
+        NodeFS.chmodSync(script, 0o755);
+      }
+
+      const checked = await findServerCli({
+        ...base,
+        home,
+        serverCommand: ["t3dev.mjs"],
+        platform: "linux",
+        searchPath: first,
+      });
+      assert.equal(checked.cli.command, NodePath.join(first, "t3dev.mjs"));
+      assert.deepEqual(checked.cli.pinned, [NodePath.join(first, "t3dev.mjs")]);
+
+      // A different t3dev.mjs earlier on PATH afterwards doesn't change what the mint runs.
+      process.env.PATH = `${later}${NodePath.delimiter}${process.env.PATH ?? ""}`;
+      try {
+        assert.equal(await mintPairingToken({ cli: checked, home }), "FROM-0.0.42");
+      } finally {
+        process.env.PATH = (process.env.PATH ?? "").slice(later.length + 1);
+      }
+      assert.deepEqual(
+        readLog(log).map((run) => run.version),
+        ["0.0.42", "0.0.42"],
+      );
+    },
+  );
+
+  it("refuses a bare serverCommand that isn't on PATH", async () => {
+    const error = await findServerCli({
+      ...base,
+      serverCommand: ["t3-not-installed"],
+      platform: "linux",
+      searchPath: tempDir("t3code-vscode-empty-path-"),
+    }).catch((cause: unknown) => cause);
+    assert.instanceOf(error, Error);
+    assert.include((error as Error).message, "an unknown version");
   });
 
   it("pins the override's files to their real paths", async () => {

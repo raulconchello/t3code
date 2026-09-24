@@ -131,10 +131,30 @@ const FUNCTION_KEY = /^F(?:[1-9]|1[0-2])$/;
 const MODIFIER_KEYS = new Set(["Alt", "AltGraph", "Control", "Meta", "Shift", "CapsLock"]);
 /** Select all, copy, cut, paste, undo and redo (plus Shift+Z), which the frame keeps. */
 const EDITING_KEYS = new Set(["a", "c", "v", "x", "y", "z"]);
+/** Caret movement and deletion keep their native meaning with any modifier. */
+const NAVIGATION_KEYS = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+  "Backspace",
+  "Delete",
+]);
 
 type ShortcutKeys = Pick<
   KeyboardEvent,
-  "key" | "code" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey"
+  | "key"
+  | "code"
+  | "altKey"
+  | "ctrlKey"
+  | "metaKey"
+  | "shiftKey"
+  | "isComposing"
+  | "getModifierState"
 >;
 
 const editingLetter = (event: ShortcutKeys) => {
@@ -145,48 +165,91 @@ const editingLetter = (event: ShortcutKeys) => {
 
 /**
  * Whether a keydown is a shortcut for the host rather than input for the app:
- * a function key, or a key pressed with Ctrl (or Cmd on macOS). Plain typing
- * and the native editing shortcuts stay in the frame.
+ * a function key, or a key pressed with Ctrl (or Cmd on macOS). Text input
+ * stays in the frame: plain typing, IME composition, AltGr characters (which
+ * Windows and Linux report as Ctrl+Alt), caret movement and deletion, and the
+ * native editing shortcuts.
  */
 export function isHostShortcut(
   event: ShortcutKeys,
   platform: EmbedHostWorkspace["platform"],
 ): boolean {
+  if (event.isComposing || event.getModifierState("AltGraph")) return false;
+  if (NAVIGATION_KEYS.has(event.key)) return false;
   if (FUNCTION_KEY.test(event.key)) return true;
   const command = event.ctrlKey || (platform === "darwin" && event.metaKey);
   if (!command || MODIFIER_KEYS.has(event.key)) return false;
+  const printable = event.key.length === 1;
+  if (platform !== "darwin" && event.ctrlKey && event.altKey && printable) return false;
   const letter = editingLetter(event);
   if (letter === undefined || event.altKey) return true;
   return event.shiftKey && letter !== "z";
 }
 
 /**
+ * The host's shortcuts that win over the app's own: the Command Palette
+ * (Cmd/Ctrl+Shift+P), Quick Open (Cmd/Ctrl+P) and F1. The app binds some of
+ * them too (Cmd+Shift+P pins a thread, Cmd+P opens its file picker).
+ */
+export function isReservedHostShortcut(
+  event: ShortcutKeys,
+  platform: EmbedHostWorkspace["platform"],
+): boolean {
+  if (event.isComposing || event.getModifierState("AltGraph") || event.altKey) return false;
+  if (event.key === "F1") {
+    return !event.ctrlKey && !event.metaKey && !event.shiftKey;
+  }
+  const command =
+    platform === "darwin" ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+  // By physical key, the same way the host relay names it (apps/vscode/src/panel.ts).
+  return command && event.code === "KeyP";
+}
+
+const forwardKeydown = (event: KeyboardEvent) =>
+  postToEmbedHost({
+    version: EMBED_HOST_PROTOCOL_VERSION,
+    type: "t3code/keydown",
+    key: event.key,
+    code: event.code,
+    keyCode: event.keyCode,
+    altKey: event.altKey,
+    ctrlKey: event.ctrlKey,
+    metaKey: event.metaKey,
+    shiftKey: event.shiftKey,
+    repeat: event.repeat,
+  });
+
+/**
  * Keydowns don't cross frames, so a host shortcut pressed while the app has
  * focus (the VS Code command palette, closing a tab) would reach only the app.
- * Once dispatch ends, a shortcut the app didn't handle goes to the host, which
- * replays it on its own page. The check waits for dispatch to finish because
- * many of the app's own shortcut listeners sit on the window after this one.
+ *
+ * Reserved host shortcuts are taken in the capture phase, before any of the
+ * app's handlers, and go straight to the host. This listener is added before
+ * the app starts, so stopping immediate propagation also keeps the app's own
+ * window capture listeners from seeing them.
+ *
+ * Other shortcuts go to the host only if the app didn't handle them. That
+ * check waits for dispatch to finish, because many of the app's shortcut
+ * listeners sit on the window after this one.
  */
 function installHostShortcutForwarding(
   target: Window,
   platform: EmbedHostWorkspace["platform"],
 ): void {
+  target.addEventListener(
+    "keydown",
+    (event) => {
+      if (!isReservedHostShortcut(event, platform)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      forwardKeydown(event);
+    },
+    true,
+  );
   target.addEventListener("keydown", (event) => {
-    if (event.isComposing || !isHostShortcut(event, platform)) return;
+    if (!isHostShortcut(event, platform)) return;
     setTimeout(() => {
-      if (event.defaultPrevented) return;
-      postToEmbedHost({
-        version: EMBED_HOST_PROTOCOL_VERSION,
-        type: "t3code/keydown",
-        key: event.key,
-        code: event.code,
-        keyCode: event.keyCode,
-        altKey: event.altKey,
-        ctrlKey: event.ctrlKey,
-        metaKey: event.metaKey,
-        shiftKey: event.shiftKey,
-        repeat: event.repeat,
-      });
+      if (!event.defaultPrevented) forwardKeydown(event);
     }, 0);
   });
 }
