@@ -686,6 +686,8 @@ class T3CodeController implements vscode.Disposable {
   }
 
   private async pasteToken(): Promise<void> {
+    // Taken before prompting: a link submitted after a Disconnect must not pair.
+    const epoch = this.connectionEpoch;
     let server: DesktopServer;
     try {
       server = await this.discover();
@@ -704,8 +706,7 @@ class T3CodeController implements vscode.Disposable {
           : "That doesn't look like a pairing link or token.",
     });
     const credential = input === undefined ? null : pairingCredentialFromInput(input);
-    if (credential === null) return;
-    const epoch = this.connectionEpoch;
+    if (credential === null || epoch !== this.connectionEpoch) return;
     try {
       const bearerToken = await pairWithPastedCredential(
         server.environmentId,
