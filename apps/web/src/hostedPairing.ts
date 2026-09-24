@@ -1,5 +1,6 @@
 import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/connectAuth";
 
+import { EMBED_HOST_BUILD } from "./embedHost";
 import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "./pairingUrl";
 
 export interface HostedPairingRequest {
@@ -32,6 +33,11 @@ function originFromUrl(value: string): string | null {
 }
 
 export function isHostedStaticApp(url?: URL): boolean {
+  // Embedded builds connect only to the environment their host hands them.
+  if (EMBED_HOST_BUILD) {
+    return true;
+  }
+
   if (configuredBackendUrl()) {
     return false;
   }

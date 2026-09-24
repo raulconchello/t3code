@@ -3,6 +3,7 @@ import type { ConfirmDialogOptions, ContextMenuItem, LocalApi } from "@t3tools/c
 import { requestConfirmDialog } from "./confirmDialog";
 import { dismissContextMenu, showContextMenuFallback } from "./contextMenuFallback";
 import { readBrowserClientSettings, writeBrowserClientSettings } from "./clientPersistenceStorage";
+import { EMBED_HOST_BUILD, openExternalInEmbedHost } from "./embedHost";
 
 let cachedApi: LocalApi | undefined;
 
@@ -24,6 +25,12 @@ function createBrowserLocalApi(): LocalApi {
           if (!opened) {
             throw new Error("Unable to open link.");
           }
+          return;
+        }
+
+        // The host page opens links for an embedded frame.
+        if (EMBED_HOST_BUILD) {
+          openExternalInEmbedHost(url);
           return;
         }
 

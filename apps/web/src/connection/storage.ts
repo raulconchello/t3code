@@ -15,6 +15,10 @@ import {
 } from "@t3tools/client-runtime/platform";
 import { TokenStore } from "@t3tools/client-runtime/authorization";
 import {
+  BearerConnectionCredential,
+  BearerConnectionProfile,
+  BearerConnectionRegistration,
+  BearerConnectionTarget,
   ConnectionTransientError,
   ConnectionBlockedError,
   CredentialStore,
@@ -25,6 +29,7 @@ import {
   gitHubRoutingPermissionFor,
 } from "@t3tools/client-runtime/connection";
 import {
+  type EmbedHostEnvironment,
   EnvironmentId,
   OrchestrationShellSnapshot,
   OrchestrationThreadDetailSnapshot,
@@ -42,6 +47,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { projectFaviconCache } from "../assets/projectFaviconCache";
+import { readEmbedHost } from "../embedHost";
 
 const DATABASE_NAME = "t3code:connection-runtime";
 const DATABASE_VERSION = 4;
@@ -271,7 +277,56 @@ export interface CatalogBackend {
   readonly quarantine?: (raw: string) => Effect.Effect<void, ConnectionTransientError>;
 }
 
+/** The bearer connection an embed host hands over, shaped like a completed pairing. */
+export function makeEmbedHostConnectionRegistration(environment: EmbedHostEnvironment) {
+  const connectionId = `bearer:${environment.environmentId}`;
+  return new BearerConnectionRegistration({
+    target: new BearerConnectionTarget({
+      environmentId: environment.environmentId,
+      label: environment.label,
+      connectionId,
+    }),
+    profile: new BearerConnectionProfile({
+      connectionId,
+      environmentId: environment.environmentId,
+      label: environment.label,
+      httpBaseUrl: environment.httpBaseUrl,
+      wsBaseUrl: environment.wsBaseUrl,
+    }),
+    credential: new BearerConnectionCredential({ token: environment.bearerToken }),
+  });
+}
+
+/**
+ * Embedded builds keep the catalog in memory, seeded with the host's
+ * connection, so the bearer token is never persisted by the frame.
+ */
+export function makeEmbedHostCatalogBackend(environment: EmbedHostEnvironment): CatalogBackend {
+  let stored: string | null = null;
+  return {
+    read: Effect.suspend(() =>
+      stored === null
+        ? encodeCatalog(
+            registerConnectionInCatalog(
+              EMPTY_CONNECTION_CATALOG_DOCUMENT,
+              makeEmbedHostConnectionRegistration(environment),
+            ),
+          )
+        : Effect.succeed(stored),
+    ),
+    write: (raw) =>
+      Effect.sync(() => {
+        stored = raw;
+      }),
+  };
+}
+
 export function makeCatalogBackend(database: IDBDatabase): CatalogBackend {
+  const embedHost = readEmbedHost();
+  if (embedHost !== null) {
+    return makeEmbedHostCatalogBackend(embedHost.environment);
+  }
+
   const bridge = window.desktopBridge;
   if (bridge?.getConnectionCatalog !== undefined && bridge.setConnectionCatalog !== undefined) {
     return {

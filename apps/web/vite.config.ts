@@ -27,21 +27,35 @@ Object.assign(process.env, repoEnv);
 // since the page still loads.
 const isSingleOriginDev = process.env.T3CODE_SINGLE_ORIGIN_DEV === "1";
 
+// Embedded builds (src/embedHost.ts) get their backend from the host page at
+// runtime. No backend URL, hosted-app origin or cloud config may be baked in,
+// even when `.env` supplies one.
+const configuredEmbedHost = process.env.VITE_T3CODE_EMBED_HOST?.trim() || "";
+const isEmbedHostBuild = configuredEmbedHost !== "";
+const publicEnv: Record<string, string | undefined> = isEmbedHostBuild ? {} : repoEnv;
+
 const port = Number(process.env.PORT ?? 5733);
 const explicitHost = process.env.HOST?.trim();
 const host = explicitHost || "localhost";
-const configuredWsUrl = isSingleOriginDev ? undefined : process.env.VITE_WS_URL?.trim();
-const configuredHttpUrl = isSingleOriginDev ? undefined : process.env.VITE_HTTP_URL?.trim();
-const configuredRelayUrl = repoEnv.VITE_T3CODE_RELAY_URL?.trim() || "";
-const configuredClerkPublishableKey = repoEnv.VITE_CLERK_PUBLISHABLE_KEY?.trim() || "";
-const configuredClerkJwtTemplate = repoEnv.VITE_CLERK_JWT_TEMPLATE?.trim() || "";
-const configuredClerkCliOAuthClientId = repoEnv.VITE_CLERK_CLI_OAUTH_CLIENT_ID?.trim() || "";
-const configuredRelayTracingUrl = repoEnv.VITE_RELAY_OTLP_TRACES_URL?.trim() || "";
-const configuredRelayTracingDataset = repoEnv.VITE_RELAY_OTLP_TRACES_DATASET?.trim() || "";
-const configuredRelayTracingToken = repoEnv.VITE_RELAY_OTLP_TRACES_TOKEN?.trim() || "";
-const configuredHostedAppChannel = process.env.VITE_HOSTED_APP_CHANNEL?.trim() || "";
+const configuredWsUrl =
+  isSingleOriginDev || isEmbedHostBuild ? undefined : process.env.VITE_WS_URL?.trim();
+const configuredHttpUrl =
+  isSingleOriginDev || isEmbedHostBuild ? undefined : process.env.VITE_HTTP_URL?.trim();
+const configuredRelayUrl = publicEnv.VITE_T3CODE_RELAY_URL?.trim() || "";
+const configuredClerkPublishableKey = publicEnv.VITE_CLERK_PUBLISHABLE_KEY?.trim() || "";
+const configuredClerkJwtTemplate = publicEnv.VITE_CLERK_JWT_TEMPLATE?.trim() || "";
+const configuredClerkCliOAuthClientId = publicEnv.VITE_CLERK_CLI_OAUTH_CLIENT_ID?.trim() || "";
+const configuredRelayTracingUrl = publicEnv.VITE_RELAY_OTLP_TRACES_URL?.trim() || "";
+const configuredRelayTracingDataset = publicEnv.VITE_RELAY_OTLP_TRACES_DATASET?.trim() || "";
+const configuredRelayTracingToken = publicEnv.VITE_RELAY_OTLP_TRACES_TOKEN?.trim() || "";
+const configuredHostedAppChannel = isEmbedHostBuild
+  ? ""
+  : process.env.VITE_HOSTED_APP_CHANNEL?.trim() || "";
 const configuredAppVersion = process.env.APP_VERSION?.trim() || pkg.version;
 const configuredHostedAppUrl = (() => {
+  if (isEmbedHostBuild) {
+    return undefined;
+  }
   const explicitHostedAppUrl = process.env.VITE_HOSTED_APP_URL?.trim();
   if (explicitHostedAppUrl) {
     return explicitHostedAppUrl;
@@ -215,6 +229,7 @@ export default defineConfig(() => {
       "import.meta.env.VITE_RELAY_OTLP_TRACES_TOKEN": JSON.stringify(configuredRelayTracingToken),
       "import.meta.env.VITE_HOSTED_APP_URL": JSON.stringify(configuredHostedAppUrl ?? ""),
       "import.meta.env.VITE_HOSTED_APP_CHANNEL": JSON.stringify(configuredHostedAppChannel),
+      "import.meta.env.VITE_T3CODE_EMBED_HOST": JSON.stringify(configuredEmbedHost),
       "import.meta.env.APP_VERSION": JSON.stringify(configuredAppVersion),
     },
     resolve: {
@@ -278,7 +293,7 @@ export default defineConfig(() => {
       devSourcemap: buildSourcemap !== false,
     },
     build: {
-      outDir: "dist",
+      outDir: process.env.T3CODE_WEB_OUT_DIR?.trim() || "dist",
       emptyOutDir: true,
       manifest: true,
       sourcemap: buildSourcemap,

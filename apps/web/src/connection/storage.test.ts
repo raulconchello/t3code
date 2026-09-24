@@ -1,4 +1,5 @@
 import {
+  BearerConnectionTarget,
   ConnectionTransientError,
   PrimaryConnectionTarget,
 } from "@t3tools/client-runtime/connection";
@@ -16,6 +17,7 @@ import {
   makeBrowserGitHubRoutingPermissions,
   makeCatalogBackend,
   makeCatalogStore,
+  makeEmbedHostCatalogBackend,
 } from "./storage";
 
 const emptyCatalog = {
@@ -85,6 +87,67 @@ describe("makeCatalogBackend", () => {
       expect(error).toBeInstanceOf(ConnectionTransientError);
       expect(error.message).toContain("Desktop secure storage is unavailable");
       expect(setConnectionCatalog).toHaveBeenCalledWith("{}");
+    }),
+  );
+});
+
+describe("makeEmbedHostCatalogBackend", () => {
+  const environment = {
+    environmentId: EnvironmentId.make("desktop-environment"),
+    label: "My Mac",
+    httpBaseUrl: "http://127.0.0.1:3773",
+    wsBaseUrl: "ws://127.0.0.1:3773",
+    bearerToken: "bearer-token",
+  };
+
+  it.effect("seeds the host's bearer connection like a completed pairing", () =>
+    Effect.gen(function* () {
+      const store = yield* makeCatalogStore(makeEmbedHostCatalogBackend(environment));
+
+      const catalog = yield* store.read;
+
+      expect(catalog.targets).toEqual([
+        new BearerConnectionTarget({
+          environmentId: environment.environmentId,
+          label: "My Mac",
+          connectionId: "bearer:desktop-environment",
+        }),
+      ]);
+      expect(catalog.profiles).toEqual([
+        expect.objectContaining({
+          connectionId: "bearer:desktop-environment",
+          environmentId: environment.environmentId,
+          httpBaseUrl: "http://127.0.0.1:3773",
+          wsBaseUrl: "ws://127.0.0.1:3773",
+        }),
+      ]);
+      expect(catalog.credentials).toEqual([
+        {
+          connectionId: "bearer:desktop-environment",
+          credential: expect.objectContaining({ token: "bearer-token" }),
+        },
+      ]);
+      expect(catalog.disabledEnvironmentIds).toEqual([]);
+    }),
+  );
+
+  it.effect("keeps catalog writes in memory", () =>
+    Effect.gen(function* () {
+      const backend = makeEmbedHostCatalogBackend(environment);
+      const store = yield* makeCatalogStore(backend);
+      const target = new BearerConnectionTarget({
+        environmentId: EnvironmentId.make("second"),
+        label: "Second",
+        connectionId: "bearer:second",
+      });
+
+      yield* store.update((catalog) => ({ ...catalog, targets: [...catalog.targets, target] }));
+
+      const raw = yield* backend.read;
+      expect(decodeCatalog(raw ?? "").targets.map((candidate) => candidate.environmentId)).toEqual([
+        "desktop-environment",
+        "second",
+      ]);
     }),
   );
 });
