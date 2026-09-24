@@ -16,6 +16,7 @@ import {
   pairingCreateArgs,
   parseCliVersionOutput,
   parsePairingCliOutput,
+  pinServerCli,
   readServerCliVersion,
   resolveDesktopAppCli,
 } from "./pairingCli.ts";
@@ -44,23 +45,53 @@ const infoPlist = (executable: string) => `<?xml version="1.0" encoding="UTF-8"?
 </dict>
 </plist>`;
 
-/** A minimal .app whose main binary is a link to this Node, so it can really run. */
+/** A minimal .app whose main binary is a hard link to this Node, so it can really run. */
 const makeAppBundle = (dir: string, name: string, executable: string) => {
   const app = NodePath.join(dir, name);
   NodeFS.mkdirSync(NodePath.join(app, "Contents", "MacOS"), { recursive: true });
   NodeFS.mkdirSync(NodePath.join(app, "Contents", "Resources"), { recursive: true });
   NodeFS.writeFileSync(NodePath.join(app, "Contents", "Info.plist"), infoPlist(executable));
-  NodeFS.symlinkSync(process.execPath, NodePath.join(app, "Contents", "MacOS", executable));
+  const binary = NodePath.join(app, "Contents", "MacOS", executable);
+  try {
+    NodeFS.linkSync(NodeFS.realpathSync(process.execPath), binary);
+  } catch {
+    NodeFS.copyFileSync(process.execPath, binary);
+    NodeFS.chmodSync(binary, 0o755);
+  }
   NodeFS.writeFileSync(NodePath.join(app, "Contents", "Resources", "app.asar"), "");
   return app;
 };
 
-const cliOf = (app: string, executable: string): ServerCliCommand => ({
-  command: NodePath.join(app, "Contents", "MacOS", executable),
-  args: [
-    NodePath.join(app, "Contents", "Resources", "app.asar", "apps", "server", "dist", "bin.mjs"),
-  ],
-});
+const cliOf = (app: string, executable: string): ServerCliCommand => {
+  const binary = NodePath.join(app, "Contents", "MacOS", executable);
+  const asar = NodePath.join(app, "Contents", "Resources", "app.asar");
+  return {
+    command: binary,
+    args: [NodePath.join(asar, "apps", "server", "dist", "bin.mjs")],
+    pinned: [binary, asar],
+  };
+};
+
+/** A fake server CLI: answers `--version` and mints, logging each run to `log`. */
+const writeFakeCli = (
+  filePath: string,
+  input: { version: string; credential: string; log: string },
+) =>
+  NodeFS.writeFileSync(
+    filePath,
+    `import * as fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(input.log)}, JSON.stringify({ version: ${JSON.stringify(input.version)}, args }) + "\\n");
+if (args[0] === "--version") console.log("t3 v${input.version}");
+else console.log(JSON.stringify({ id: "pairing-1", credential: ${JSON.stringify(input.credential)} }));
+`,
+  );
+
+const readLog = (log: string) =>
+  NodeFS.readFileSync(log, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { version: string; args: string[] });
 
 /** Runs a process from a bundle's binary, like the desktop app runs its server. */
 const runFromBundle = (app: string, executable: string) => {
@@ -164,7 +195,7 @@ console.log("t3 v9.9.9");
 `,
     );
     assert.equal(
-      await readServerCliVersion({ command: process.execPath, args: [script] }, dir),
+      await readServerCliVersion(pinServerCli(process.execPath, [script]), dir),
       "9.9.9",
     );
     assert.deepEqual(JSON.parse(NodeFS.readFileSync(record, "utf8")), {
@@ -177,7 +208,7 @@ console.log("t3 v9.9.9");
     const dir = tempDir("t3code-vscode-version-");
     const script = NodePath.join(dir, "cli.mjs");
     NodeFS.writeFileSync(script, "process.exit(2);");
-    assert.isNull(await readServerCliVersion({ command: process.execPath, args: [script] }, dir));
+    assert.isNull(await readServerCliVersion(pinServerCli(process.execPath, [script]), dir));
   });
 });
 
@@ -191,21 +222,35 @@ describe("findServerCli", () => {
   };
 
   it("uses the serverCommand override when it is the server's version", async () => {
-    const cli = { command: "node", args: ["/repo/apps/server/dist/bin.mjs"] };
+    const cli = { command: "node", args: ["/repo/apps/server/dist/bin.mjs"], pinned: [] };
     const checked: ServerCliCommand[] = [];
-    assert.deepEqual(
-      await findServerCli({
-        ...base,
-        serverCommand: [cli.command, ...cli.args],
-        platform: "linux",
-        readVersion: async (candidate) => {
-          checked.push(candidate);
-          return "0.0.42";
-        },
-      }),
-      cli,
-    );
+    const found = await findServerCli({
+      ...base,
+      serverCommand: [cli.command, ...cli.args],
+      platform: "linux",
+      readVersion: async (candidate) => {
+        checked.push(candidate);
+        return "0.0.42";
+      },
+    });
+    assert.deepEqual(found.cli, cli);
     assert.deepEqual(checked, [cli]);
+  });
+
+  it("pins the override's files to their real paths", async () => {
+    const dir = tempDir("t3code-vscode-pin-");
+    const real = NodePath.join(dir, "real-cli.mjs");
+    const link = NodePath.join(dir, "cli.mjs");
+    NodeFS.writeFileSync(real, "");
+    NodeFS.symlinkSync(real, link);
+    const found = await findServerCli({
+      ...base,
+      serverCommand: [process.execPath, link, "--flag"],
+      platform: "linux",
+      readVersion: async () => "0.0.42",
+    });
+    assert.deepEqual(found.cli.args, [real, "--flag"]);
+    assert.include(found.cli.pinned, real);
   });
 
   it("refuses a serverCommand of another version", async () => {
@@ -242,7 +287,7 @@ describe("findServerCli", () => {
         [cliOf(alpha, "Alpha").command, "0.0.42"],
       ]);
       const checked: string[] = [];
-      const cli = await findServerCli({
+      const found = await findServerCli({
         ...base,
         desktopAppPath: nightly,
         serverPid: runFromBundle(alpha, "Alpha"),
@@ -253,7 +298,7 @@ describe("findServerCli", () => {
           return versions.get(candidate.command) ?? null;
         },
       });
-      assert.deepEqual(cli, cliOf(alpha, "Alpha"));
+      assert.deepEqual(found.cli, cliOf(alpha, "Alpha"));
       assert.deepEqual(checked, [cliOf(nightly, "Nightly").command, cliOf(alpha, "Alpha").command]);
     },
   );
@@ -289,6 +334,17 @@ describe("findServerCli", () => {
 });
 
 describe("mintPairingToken", () => {
+  const checkedFakeCli = (script: string, home: string) =>
+    findServerCli({
+      serverCommand: [process.execPath, script],
+      desktopAppPath: undefined,
+      serverPid: process.pid,
+      serverVersion: "0.0.42",
+      home,
+      homeDirectory: "/nowhere",
+      platform: "linux",
+    });
+
   it("runs `auth pairing create` against the T3 home as Node and returns the credential", async () => {
     const home = tempDir("t3code-vscode-mint-");
     const script = NodePath.join(home, "fake-cli.mjs");
@@ -296,6 +352,7 @@ describe("mintPairingToken", () => {
     NodeFS.writeFileSync(
       script,
       `import * as fs from "node:fs";
+if (process.argv[2] === "--version") { console.log("t3 v0.0.42"); process.exit(0); }
 fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({
   args: process.argv.slice(2),
   cwd: process.cwd(),
@@ -304,10 +361,7 @@ fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({
 process.stdout.write(${JSON.stringify(cliJson)});
 `,
     );
-    const credential = await mintPairingToken({
-      cli: { command: process.execPath, args: [script] },
-      home,
-    });
+    const credential = await mintPairingToken({ cli: await checkedFakeCli(script, home), home });
     assert.equal(credential, "ABCD-EFGH-IJKL");
     const invocation = JSON.parse(NodeFS.readFileSync(record, "utf8"));
     assert.deepEqual(invocation.args, pairingCreateArgs(home));
@@ -315,14 +369,56 @@ process.stdout.write(${JSON.stringify(cliJson)});
     assert.equal(invocation.electronRunAsNode, "1");
   });
 
+  it("refuses to mint when the CLI changed after its version check", async () => {
+    const home = tempDir("t3code-vscode-mint-");
+    const script = NodePath.join(home, "cli.mjs");
+    const log = NodePath.join(home, "runs.log");
+    writeFakeCli(script, { version: "0.0.42", credential: "OLD", log });
+    const checked = await checkedFakeCli(script, home);
+
+    // An update replaces the file in place, the way an app update swaps its bundle.
+    const update = NodePath.join(home, "cli.mjs.new");
+    writeFakeCli(update, { version: "0.0.43", credential: "NEW", log });
+    NodeFS.renameSync(update, script);
+
+    const error = await mintPairingToken({ cli: checked, home }).catch((cause: unknown) => cause);
+    assert.instanceOf(error, Error);
+    assert.include((error as Error).message, "changed");
+    assert.deepEqual(readLog(log), [{ version: "0.0.42", args: ["--version"] }]);
+  });
+
+  it("launches the checked file even when its path is repointed afterwards", async () => {
+    const home = tempDir("t3code-vscode-mint-");
+    const log = NodePath.join(home, "runs.log");
+    const current = NodePath.join(home, "v42.mjs");
+    const next = NodePath.join(home, "v43.mjs");
+    const link = NodePath.join(home, "cli.mjs");
+    writeFakeCli(current, { version: "0.0.42", credential: "FROM-42", log });
+    writeFakeCli(next, { version: "0.0.43", credential: "FROM-43", log });
+    NodeFS.symlinkSync(current, link);
+    const checked = await checkedFakeCli(link, home);
+
+    NodeFS.rmSync(link);
+    NodeFS.symlinkSync(next, link);
+
+    assert.equal(await mintPairingToken({ cli: checked, home }), "FROM-42");
+    assert.deepEqual(
+      readLog(log).map((run) => run.version),
+      ["0.0.42", "0.0.42"],
+    );
+  });
+
   it("reports the CLI's error output", async () => {
     const home = tempDir("t3code-vscode-mint-");
     const script = NodePath.join(home, "failing-cli.mjs");
-    NodeFS.writeFileSync(script, `process.stderr.write("database is locked\\n"); process.exit(3);`);
-    const error = await mintPairingToken({
-      cli: { command: process.execPath, args: [script] },
-      home,
-    }).catch((cause: unknown) => cause);
+    NodeFS.writeFileSync(
+      script,
+      `if (process.argv[2] === "--version") { console.log("t3 v0.0.42"); process.exit(0); }
+process.stderr.write("database is locked\\n"); process.exit(3);`,
+    );
+    const error = await mintPairingToken({ cli: await checkedFakeCli(script, home), home }).catch(
+      (cause: unknown) => cause,
+    );
     assert.instanceOf(error, Error);
     assert.include((error as Error).message, "database is locked");
   });

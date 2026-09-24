@@ -6,7 +6,10 @@
  *
  *   node scripts/smoke-test.ts
  *
- * T3CODE_SMOKE_VSCODE overrides the VS Code executable, T3CODE_SMOKE_DESKTOP_APP
+ * The server gets a fake HOME and a PATH without any coding agent CLI, so
+ * nothing the test does can start an agent.
+ *
+ * T3CODE_SMOKE_PORT overrides the server port (38873), T3CODE_SMOKE_VSCODE the VS Code executable, T3CODE_SMOKE_DESKTOP_APP
  * the desktop app, T3CODE_SMOKE_SUITE the suite that runs inside VS Code, and
  * T3CODE_SMOKE_KEEP=1 keeps the temporary directory for inspection.
  */
@@ -24,7 +27,7 @@ import {
   resolveDesktopAppCli,
 } from "../src/pairingCli.ts";
 
-const SANDBOX_PORT = 38773;
+const SANDBOX_PORT = Number(process.env.T3CODE_SMOKE_PORT ?? 38_873);
 const appDir = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
 const vscodeExecutable =
   process.env.T3CODE_SMOKE_VSCODE ?? "/Applications/Visual Studio Code.app/Contents/MacOS/Code";
@@ -42,6 +45,7 @@ for (const required of ["dist/extension.cjs", "dist/web/index.html"]) {
 const sandbox = NodeFS.realpathSync(NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3vs-")));
 // Short names: VS Code puts its IPC socket in the user data dir, and socket paths are length-limited.
 const home = NodePath.join(sandbox, "home");
+const fakeHome = NodePath.join(sandbox, "fake-home");
 const fixture = NodePath.join(sandbox, "fixture-project");
 const userDataDir = NodePath.join(sandbox, "udd");
 const extensionsDir = NodePath.join(sandbox, "ext");
@@ -49,7 +53,7 @@ const liveHome = NodePath.join(NodeOS.homedir(), ".t3");
 if (home === liveHome || home.startsWith(`${liveHome}${NodePath.sep}`)) {
   throw new Error(`Refusing to use ${home}: it is inside the live T3 home.`);
 }
-for (const dir of [home, fixture, NodePath.join(userDataDir, "User"), extensionsDir]) {
+for (const dir of [home, fakeHome, fixture, NodePath.join(userDataDir, "User"), extensionsDir]) {
   NodeFS.mkdirSync(dir, { recursive: true });
 }
 NodeFS.writeFileSync(NodePath.join(fixture, "README.md"), "# Smoke test fixture\n");
@@ -102,7 +106,12 @@ const server = NodeChildProcess.spawn(
   ],
   {
     cwd: home,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    env: {
+      HOME: fakeHome,
+      PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+      TMPDIR: NodeOS.tmpdir(),
+      ELECTRON_RUN_AS_NODE: "1",
+    },
     stdio: ["ignore", serverLog, serverLog],
   },
 );

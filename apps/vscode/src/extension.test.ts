@@ -7,7 +7,15 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { afterEach, assert, beforeEach, describe, it, vi } from "vite-plus/test";
 import type * as vscodeTypes from "vscode";
 
-import { type FakeFolder, type FakePanel, Uri, fake, window } from "../test/fakeVscode.ts";
+import {
+  type FakeFolder,
+  FakePanel,
+  TabInputText,
+  TabInputWebview,
+  Uri,
+  fake,
+  window,
+} from "../test/fakeVscode.ts";
 import type { DesktopServer, DesktopServerDiscovery } from "./desktopServer.ts";
 import type { StaticServer } from "./staticServer.ts";
 
@@ -56,14 +64,14 @@ const gate = () => {
   return { promise, open };
 };
 
-const server = (environmentId = "env-desktop"): DesktopServer => ({
+const server = (environmentId = "env-desktop", port = 3773): DesktopServer => ({
   home: "/sandbox/t3-home",
   pid: 1234,
   environmentId: environmentId as EnvironmentId,
   label: "Studio Mac",
   serverVersion: "0.0.42",
-  httpBaseUrl: "http://127.0.0.1:38773/",
-  wsBaseUrl: "ws://127.0.0.1:38773/",
+  httpBaseUrl: `http://127.0.0.1:${port}/`,
+  wsBaseUrl: `ws://127.0.0.1:${port}/`,
 });
 
 interface FakeStaticServer extends StaticServer {
@@ -156,14 +164,24 @@ const pageOf = (panel: FakePanel) => {
 const fromFrame = (panel: FakePanel, message: Record<string, unknown>) =>
   panel.receive({ kind: "t3code-host/from-frame", message: { version: 1, ...message } });
 
-/** The bearer token in the latest init the extension sent to the panel. */
-const lastInitToken = (panel: FakePanel) => {
+/** The environment in the latest init the extension sent to the panel. */
+const lastInitEnvironment = (panel: FakePanel) => {
   const init = panel.posted.at(-1);
   if (typeof init !== "object" || init === null || !("message" in init)) return null;
   const message = init.message;
   return typeof message === "object" && message !== null && "environment" in message
-    ? (message.environment as { bearerToken: string }).bearerToken
+    ? (message.environment as { bearerToken: string; httpBaseUrl: string })
     : null;
+};
+const lastInitToken = (panel: FakePanel) => lastInitEnvironment(panel)?.bearerToken ?? null;
+
+/** Opens a folder and lets its app say hello, so it holds an init. */
+const openApp = async (folder: FakeFolder) => {
+  await openFolder(folder);
+  const panel = fake.panels.at(-1)!;
+  fromFrame(panel, { type: "t3code/hello" });
+  await flush();
+  return panel;
 };
 
 const openFolder = (folder: FakeFolder) => fake.execute("t3code.open", folder.uri);
@@ -298,8 +316,10 @@ describe("pairing", () => {
     };
 
     const restoredPanel = window.createWebviewPanel("t3code.workspace", "");
+    globalState.set("t3code.pairingGeneration", "saved");
     const restoring = fake.serializer!.deserializeWebviewPanel(restoredPanel, {
       folderUri: restoredFolder.uri.toString(),
+      generation: "saved",
     });
     await flush();
     const opening = openFolder(openedFolder);
@@ -349,6 +369,164 @@ describe("pairing", () => {
     io.mint = async () => `pairing-${++mints}`;
     await openFolder(folder);
     assert.equal(mints, 2, "the next open pairs again instead of reusing the old attempt");
+  });
+});
+
+describe("Disconnect and saved panels", () => {
+  /** The state a panel's page saved, which VS Code hands back on restore. */
+  const savedState = (panel: FakePanel): unknown =>
+    JSON.parse(/vscode\.setState\((\{[^)]*\})\)/.exec(panel.webview.html)?.[1] ?? "null");
+
+  it("closes T3 Code tabs VS Code hasn't restored yet, and only those", async () => {
+    const readme = { label: "README.md", input: new TabInputText(Uri.file("/work/README.md")) };
+    const unrestored = {
+      label: "T3 Code: app",
+      input: new TabInputWebview("mainThreadWebview-t3code.workspace"),
+    };
+    fake.tabs.push(readme, unrestored);
+
+    await fake.execute("t3code.disconnect");
+
+    assert.deepEqual(fake.tabs, [readme]);
+  });
+
+  it("closes a panel saved before Disconnect when it is restored, but not a newer one", async () => {
+    makeStaticServers();
+    const folder = fake.addFolder("/work/app", "app");
+    grantConsent();
+    await openFolder(folder);
+    const stale = savedState(fake.panels[0]!);
+
+    await fake.execute("t3code.disconnect");
+    grantConsent();
+    await openFolder(folder);
+    const current = savedState(fake.panels.at(-1)!);
+    fake.panels.at(-1)?.dispose();
+
+    const restoredStale = new FakePanel();
+    await fake.serializer!.deserializeWebviewPanel(restoredStale, stale);
+    const restoredCurrent = new FakePanel();
+    await fake.serializer!.deserializeWebviewPanel(restoredCurrent, current);
+
+    assert.isTrue(restoredStale.disposed);
+    assert.isFalse(restoredCurrent.disposed);
+    assert.property(pageOf(restoredCurrent), "app");
+  });
+});
+
+describe("manual pairing", () => {
+  it("Disconnect during a pasted token's exchange keeps it from saving or connecting", async () => {
+    makeStaticServers();
+    const folder = fake.addFolder("/work/app", "app");
+    const exchanging = gate();
+    io.exchange = async (credential) => {
+      await exchanging.promise;
+      return `bearer-for-${credential}`;
+    };
+    fake.pick = (items) => items.find((item) => (item as { id: string }).id === "paste");
+    fake.inputAnswer = "http://127.0.0.1:3773/pair#token=PASTED";
+
+    const connecting = fake.execute("t3code.connect");
+    await flush();
+    await fake.execute("t3code.disconnect");
+    exchanging.open();
+    await connecting;
+    await flush();
+
+    assert.equal(secrets.size, 0);
+    assert.deepEqual(fake.errors, []);
+    await openFolder(folder);
+    assert.equal(fake.modalPrompts, 1, "the next open asks for consent again");
+    assert.deepEqual(pageOf(fake.panels.at(-1)!), { message: "Connect VS Code to T3 Code." });
+  });
+});
+
+describe("a desktop server that moved", () => {
+  const moveServer = (port: number) => {
+    io.discover = async () => ({ _tag: "Found", server: server("env-desktop", port) });
+  };
+
+  it("Connect hands every open app the new endpoint", async () => {
+    makeStaticServers();
+    grantConsent();
+    const panel = await openApp(fake.addFolder("/work/app", "app"));
+    assert.equal(lastInitEnvironment(panel)?.httpBaseUrl, "http://127.0.0.1:3773/");
+
+    moveServer(3999);
+    fake.pick = (items) => items.find((item) => (item as { id: string }).id === "auto");
+    await fake.execute("t3code.connect");
+    await flush();
+
+    assert.equal(lastInitEnvironment(panel)?.httpBaseUrl, "http://127.0.0.1:3999/");
+  });
+
+  it("opening a panel rediscovers the server instead of reusing a stale endpoint", async () => {
+    makeStaticServers();
+    grantConsent();
+    const first = await openApp(fake.addFolder("/work/first", "first"));
+
+    moveServer(3999);
+    const second = await openApp(fake.addFolder("/work/second", "second"));
+    await flush();
+
+    assert.equal(lastInitEnvironment(second)?.httpBaseUrl, "http://127.0.0.1:3999/");
+    assert.equal(lastInitEnvironment(first)?.httpBaseUrl, "http://127.0.0.1:3999/");
+  });
+
+  it("an app that loses its connection follows the server to its new port", async () => {
+    makeStaticServers();
+    grantConsent();
+    const panel = await openApp(fake.addFolder("/work/app", "app"));
+    fromFrame(panel, { type: "t3code/status", phase: "ready" });
+    await flush();
+
+    moveServer(3999);
+    fromFrame(panel, { type: "t3code/status", phase: "connecting" });
+    await flush();
+
+    assert.equal(lastInitEnvironment(panel)?.httpBaseUrl, "http://127.0.0.1:3999/");
+    assert.deepEqual(fake.warnings, []);
+  });
+
+  it("an app stuck connecting to a server that didn't move offers Reconnect", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      makeStaticServers();
+      grantConsent();
+      const panel = await openApp(fake.addFolder("/work/app", "app"));
+      fromFrame(panel, { type: "t3code/status", phase: "connecting" });
+      await flush();
+      const renders = panel.renders;
+      fake.warningAnswer = "Reconnect";
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await flush();
+
+      assert.deepEqual(fake.warnings, ["T3 Code can't reach the desktop app for app."]);
+      assert.isAbove(panel.renders, renders, "Reconnect reloads the panel");
+      assert.property(pageOf(panel), "app");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an app that becomes ready again offers nothing", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      makeStaticServers();
+      grantConsent();
+      const panel = await openApp(fake.addFolder("/work/app", "app"));
+      fromFrame(panel, { type: "t3code/status", phase: "connecting" });
+      fromFrame(panel, { type: "t3code/status", phase: "ready" });
+      await flush();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await flush();
+
+      assert.deepEqual(fake.warnings, []);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

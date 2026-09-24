@@ -6,8 +6,8 @@ import { DesktopAppActivationPlatform } from "./desktopAppActivation.ts";
 /**
  * postMessage protocol between the embedded web app (an iframe) and the page
  * hosting it, such as the VS Code extension webview. The frame sends `hello`,
- * the host answers with `init`, then the frame reports `status` and asks the
- * host to open external links.
+ * the host answers with `init`, then the frame reports `status`, asks the host
+ * to open external links, and passes on shortcuts meant for the host.
  */
 export const EMBED_HOST_PROTOCOL_VERSION = 1 as const;
 
@@ -79,11 +79,31 @@ export const EmbedHostOpenExternalMessage = Schema.Struct({
 });
 export type EmbedHostOpenExternalMessage = typeof EmbedHostOpenExternalMessage.Type;
 
+/**
+ * A shortcut the app didn't handle, so the host can act on it as if it had
+ * been pressed on its own page (keydown events don't cross frames). The fields
+ * mirror the KeyboardEvent.
+ */
+export const EmbedHostKeydownMessage = Schema.Struct({
+  version: Schema.Literal(EMBED_HOST_PROTOCOL_VERSION),
+  type: Schema.Literal("t3code/keydown"),
+  key: Schema.String,
+  code: Schema.String,
+  keyCode: Schema.Int,
+  altKey: Schema.Boolean,
+  ctrlKey: Schema.Boolean,
+  metaKey: Schema.Boolean,
+  shiftKey: Schema.Boolean,
+  repeat: Schema.Boolean,
+});
+export type EmbedHostKeydownMessage = typeof EmbedHostKeydownMessage.Type;
+
 /** Messages the embedded frame sends to its host. */
 export const EmbedFrameToHostMessage = Schema.Union([
   EmbedHostHelloMessage,
   EmbedHostStatusMessage,
   EmbedHostOpenExternalMessage,
+  EmbedHostKeydownMessage,
 ]);
 export type EmbedFrameToHostMessage = typeof EmbedFrameToHostMessage.Type;
 export const isEmbedFrameToHostMessage = Schema.is(EmbedFrameToHostMessage);

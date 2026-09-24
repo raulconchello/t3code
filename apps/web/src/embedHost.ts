@@ -3,6 +3,7 @@ import {
   type EmbedFrameToHostMessage,
   type EmbedHostInitMessage,
   type EmbedHostStatusMessage,
+  type EmbedHostWorkspace,
   isEmbedHostToFrameMessage,
 } from "@t3tools/contracts";
 
@@ -52,6 +53,7 @@ export function connectEmbedHost(target: Window = window): Promise<EmbedHostInit
         }
         connection = { init: event.data, host: target.parent, origin: event.origin };
         installExternalLinkHandler(target);
+        installHostShortcutForwarding(target, event.data.workspace.platform);
         resolve(event.data);
         return;
       }
@@ -123,4 +125,68 @@ function installExternalLinkHandler(target: Window): void {
   };
   target.addEventListener("click", handle);
   target.addEventListener("auxclick", handle);
+}
+
+const FUNCTION_KEY = /^F(?:[1-9]|1[0-2])$/;
+const MODIFIER_KEYS = new Set(["Alt", "AltGraph", "Control", "Meta", "Shift", "CapsLock"]);
+/** Select all, copy, cut, paste, undo and redo (plus Shift+Z), which the frame keeps. */
+const EDITING_KEYS = new Set(["a", "c", "v", "x", "y", "z"]);
+
+type ShortcutKeys = Pick<
+  KeyboardEvent,
+  "key" | "code" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey"
+>;
+
+const editingLetter = (event: ShortcutKeys) => {
+  const fromCode = /^Key([A-Z])$/.exec(event.code)?.[1]?.toLowerCase();
+  const fromKey = event.key.length === 1 ? event.key.toLowerCase() : undefined;
+  return [fromCode, fromKey].find((letter) => letter !== undefined && EDITING_KEYS.has(letter));
+};
+
+/**
+ * Whether a keydown is a shortcut for the host rather than input for the app:
+ * a function key, or a key pressed with Ctrl (or Cmd on macOS). Plain typing
+ * and the native editing shortcuts stay in the frame.
+ */
+export function isHostShortcut(
+  event: ShortcutKeys,
+  platform: EmbedHostWorkspace["platform"],
+): boolean {
+  if (FUNCTION_KEY.test(event.key)) return true;
+  const command = event.ctrlKey || (platform === "darwin" && event.metaKey);
+  if (!command || MODIFIER_KEYS.has(event.key)) return false;
+  const letter = editingLetter(event);
+  if (letter === undefined || event.altKey) return true;
+  return event.shiftKey && letter !== "z";
+}
+
+/**
+ * Keydowns don't cross frames, so a host shortcut pressed while the app has
+ * focus (the VS Code command palette, closing a tab) would reach only the app.
+ * Once dispatch ends, a shortcut the app didn't handle goes to the host, which
+ * replays it on its own page. The check waits for dispatch to finish because
+ * many of the app's own shortcut listeners sit on the window after this one.
+ */
+function installHostShortcutForwarding(
+  target: Window,
+  platform: EmbedHostWorkspace["platform"],
+): void {
+  target.addEventListener("keydown", (event) => {
+    if (event.isComposing || !isHostShortcut(event, platform)) return;
+    setTimeout(() => {
+      if (event.defaultPrevented) return;
+      postToEmbedHost({
+        version: EMBED_HOST_PROTOCOL_VERSION,
+        type: "t3code/keydown",
+        key: event.key,
+        code: event.code,
+        keyCode: event.keyCode,
+        altKey: event.altKey,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+        repeat: event.repeat,
+      });
+    }, 0);
+  });
 }

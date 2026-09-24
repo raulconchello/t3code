@@ -157,3 +157,121 @@ describe("connectEmbedHost", () => {
     }),
   );
 });
+
+interface KeyInit {
+  readonly key: string;
+  readonly code?: string;
+  readonly keyCode?: number;
+  readonly altKey?: boolean;
+  readonly ctrlKey?: boolean;
+  readonly metaKey?: boolean;
+  readonly shiftKey?: boolean;
+}
+
+function keydown(init: KeyInit) {
+  const event = new Event("keydown", { cancelable: true });
+  Object.defineProperties(event, {
+    key: { value: init.key },
+    code: { value: init.code ?? "" },
+    keyCode: { value: init.keyCode ?? 0 },
+    altKey: { value: init.altKey ?? false },
+    ctrlKey: { value: init.ctrlKey ?? false },
+    metaKey: { value: init.metaKey ?? false },
+    shiftKey: { value: init.shiftKey ?? false },
+    repeat: { value: false },
+    isComposing: { value: false },
+  });
+  return event;
+}
+
+const keys = (init: KeyInit) => ({
+  code: "",
+  altKey: false,
+  ctrlKey: false,
+  metaKey: false,
+  shiftKey: false,
+  ...init,
+});
+
+describe("isHostShortcut", () => {
+  it("passes Cmd shortcuts on macOS and Ctrl shortcuts everywhere", async () => {
+    const { isHostShortcut } = await loadEmbedHost();
+    const palette = keys({ key: "P", code: "KeyP", metaKey: true, shiftKey: true });
+    expect(isHostShortcut(palette, "darwin")).toBe(true);
+    expect(isHostShortcut(palette, "linux")).toBe(false);
+    expect(
+      isHostShortcut(keys({ key: "P", code: "KeyP", ctrlKey: true, shiftKey: true }), "win32"),
+    ).toBe(true);
+    expect(isHostShortcut(keys({ key: "w", code: "KeyW", metaKey: true }), "darwin")).toBe(true);
+    expect(isHostShortcut(keys({ key: "1", code: "Digit1", metaKey: true }), "darwin")).toBe(true);
+    expect(isHostShortcut(keys({ key: "F1", code: "F1" }), "linux")).toBe(true);
+  });
+
+  it("keeps typing and native editing shortcuts in the app", async () => {
+    const { isHostShortcut } = await loadEmbedHost();
+    expect(isHostShortcut(keys({ key: "p", code: "KeyP" }), "darwin")).toBe(false);
+    expect(isHostShortcut(keys({ key: "P", code: "KeyP", shiftKey: true }), "darwin")).toBe(false);
+    expect(isHostShortcut(keys({ key: "Enter", code: "Enter" }), "darwin")).toBe(false);
+    expect(isHostShortcut(keys({ key: "Meta", code: "MetaLeft", metaKey: true }), "darwin")).toBe(
+      false,
+    );
+    for (const letter of ["a", "c", "v", "x", "y", "z"]) {
+      const code = `Key${letter.toUpperCase()}`;
+      expect(isHostShortcut(keys({ key: letter, code, metaKey: true }), "darwin")).toBe(false);
+      expect(isHostShortcut(keys({ key: letter, code, ctrlKey: true }), "win32")).toBe(false);
+    }
+    expect(
+      isHostShortcut(keys({ key: "z", code: "KeyZ", metaKey: true, shiftKey: true }), "darwin"),
+    ).toBe(false);
+    // A Cyrillic layout still copies with the physical C key.
+    expect(isHostShortcut(keys({ key: "с", code: "KeyC", ctrlKey: true }), "linux")).toBe(false);
+    // Shift turns the others into different shortcuts, such as Cmd+Shift+X.
+    expect(
+      isHostShortcut(keys({ key: "x", code: "KeyX", metaKey: true, shiftKey: true }), "darwin"),
+    ).toBe(true);
+  });
+});
+
+describe("host shortcut forwarding", () => {
+  const afterDispatch = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("sends shortcuts the app didn't handle to the host", async () => {
+    const frame = new FakeFrame();
+    await connect(frame);
+    frame.parent.postMessage.mockClear();
+
+    frame.dispatchEvent(
+      keydown({ key: "P", code: "KeyP", keyCode: 80, metaKey: true, shiftKey: true }),
+    );
+    await afterDispatch();
+
+    expect(frame.parent.postMessage).toHaveBeenCalledWith(
+      {
+        version: 1,
+        type: "t3code/keydown",
+        key: "P",
+        code: "KeyP",
+        keyCode: 80,
+        altKey: false,
+        ctrlKey: false,
+        metaKey: true,
+        shiftKey: true,
+        repeat: false,
+      },
+      HOST_ORIGIN,
+    );
+  });
+
+  it("keeps shortcuts the app handled, even in a listener added later", async () => {
+    const frame = new FakeFrame();
+    await connect(frame);
+    frame.addEventListener("keydown", (event) => event.preventDefault());
+    frame.parent.postMessage.mockClear();
+
+    frame.dispatchEvent(keydown({ key: "k", code: "KeyK", metaKey: true }));
+    frame.dispatchEvent(keydown({ key: "p", code: "KeyP" }));
+    await afterDispatch();
+
+    expect(frame.parent.postMessage).not.toHaveBeenCalled();
+  });
+});
