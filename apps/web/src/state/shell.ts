@@ -19,7 +19,12 @@ import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { environmentCatalog } from "../connection/catalog";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { isHostedStaticApp } from "../hostedPairing";
-import { lockShellSnapshot, readWorkspaceLock, type WorkspaceLock } from "../workspaceLock";
+import {
+  isWorkspaceLocked,
+  lockShellSnapshot,
+  readWorkspaceLock,
+  type WorkspaceLock,
+} from "../workspaceLock";
 
 const EMPTY_LOCKED_SHELL_STATE: EnvironmentShellState = {
   snapshot: Option.none(),
@@ -31,20 +36,22 @@ const EMPTY_LOCKED_SHELL_STATE: EnvironmentShellState = {
  * Filters every shell state through the workspace lock. The locked atoms are
  * the only source for projects, threads, notifications and the routes, so the
  * app never sees anything outside the lock. Each state is filtered once per
- * upstream change, not per read.
+ * upstream change, not per read. `readLock` is called when a state is read,
+ * after the host's init has arrived.
  */
-function lockEnvironmentShellAtoms<E>(
+export function lockEnvironmentShellAtoms<E>(
   unlockedStateAtom: (
     environmentId: EnvironmentId,
   ) => Atom.Atom<AsyncResult.AsyncResult<EnvironmentShellState, E>>,
-  lock: WorkspaceLock,
+  readLock: () => WorkspaceLock | null,
 ) {
   const stateAtom = Atom.family((environmentId: EnvironmentId) => {
     let previous: OrchestrationShellSnapshot | null = null;
     return Atom.make((get) => {
       const result = get(unlockedStateAtom(environmentId));
+      const lock = readLock();
       const state = Option.getOrNull(AsyncResult.value(result));
-      if (state === null || Option.isNone(state.snapshot)) return result;
+      if (lock === null || state === null || Option.isNone(state.snapshot)) return result;
       const snapshot = lockShellSnapshot(state.snapshot.value, environmentId, lock, previous);
       previous = snapshot;
       if (snapshot === state.snapshot.value) return result;
@@ -63,14 +70,12 @@ function lockEnvironmentShellAtoms<E>(
   return { stateAtom, stateValueAtom };
 }
 
-const workspaceLock = readWorkspaceLock();
 const unlockedEnvironmentShell = createEnvironmentShellAtoms(connectionAtomRuntime);
 
 export const shellEnvironment = createShellEnvironmentAtoms(connectionAtomRuntime);
-export const environmentShell =
-  workspaceLock === null
-    ? unlockedEnvironmentShell
-    : lockEnvironmentShellAtoms(unlockedEnvironmentShell.stateAtom, workspaceLock);
+export const environmentShell = isWorkspaceLocked
+  ? lockEnvironmentShellAtoms(unlockedEnvironmentShell.stateAtom, readWorkspaceLock)
+  : unlockedEnvironmentShell;
 export const environmentSnapshotAtom = createEnvironmentSnapshotAtom(environmentShell.stateAtom);
 
 export const allEnvironmentShellsBootstrappedAtom = Atom.make((get) => {

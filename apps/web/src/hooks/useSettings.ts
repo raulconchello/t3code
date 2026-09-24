@@ -41,11 +41,11 @@ import {
 import * as Struct from "effect/Struct";
 import { toastManager } from "~/components/ui/toast";
 import { isHostedStaticApp } from "~/hostedPairing";
+import { isWorkspaceLocked } from "~/workspaceLock";
 import { primaryServerSettingsAtom, serverEnvironment } from "~/state/server";
 import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useTheme } from "./useTheme";
-import { useWorkspaceLock } from "./useWorkspaceLock";
 
 const CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE = "[CLIENT_SETTINGS]";
 
@@ -378,8 +378,7 @@ export function useLegacySidebarEnabled(): boolean {
   const settingsHydrated = useClientSettingsHydrated();
   const legacySidebarEnabled = useClientSettingsValue().legacySidebarEnabled;
   // The legacy sidebar knows nothing of workspace locks.
-  const workspaceLocked = useWorkspaceLock() !== null;
-  return settingsHydrated && legacySidebarEnabled && !workspaceLocked;
+  return settingsHydrated && legacySidebarEnabled && !isWorkspaceLocked;
 }
 
 /** Read current settings for one environment, merged with client-local preferences. */

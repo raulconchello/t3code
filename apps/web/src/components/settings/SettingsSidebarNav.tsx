@@ -48,7 +48,7 @@ import {
   type SettingsSearchItem,
 } from "./settingsSearch";
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
-import { useWorkspaceLock } from "../../hooks/useWorkspaceLock";
+import { isWorkspaceLocked } from "../../workspaceLock";
 import { validateSettingsScopeSearch } from "./settingsScope";
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
@@ -110,12 +110,11 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const currentHash = useLocation({ select: (location) => location.hash });
   const currentSearch = useLocation({ select: (location) => location.search });
   const scopeSearch = useMemo(() => validateSettingsScopeSearch(currentSearch), [currentSearch]);
-  // Connections manage every environment, so a workspace lock leaves them out.
-  const workspaceLocked = useWorkspaceLock() !== null;
   const navItems = SETTINGS_NAV_ITEMS.filter(
     (item) =>
       (item.to !== "/settings/projects" || isSettingsOverviewVisible(scopeSearch)) &&
-      (item.to !== "/settings/connections" || !workspaceLocked),
+      // Connections manage every environment, so a workspace lock leaves them out.
+      (item.to !== "/settings/connections" || !isWorkspaceLocked),
   );
   const { isMobile, setOpenMobile, open, setOpen } = useSidebar();
   const searchInputRef = useRef<HTMLInputElement>(null);

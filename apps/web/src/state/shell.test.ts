@@ -4,12 +4,21 @@ import {
 } from "@t3tools/client-runtime/connection";
 import type { EnvironmentCatalogState } from "@t3tools/client-runtime/state/connections";
 import type { EnvironmentShellState } from "@t3tools/client-runtime/state/shell";
-import { EnvironmentId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  type OrchestrationProjectShell,
+  type OrchestrationShellSnapshot,
+  type OrchestrationThreadShell,
+  ProjectId,
+  ThreadId,
+} from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
-import { Atom, AtomRegistry } from "effect/unstable/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
 import { describe, expect, it } from "vite-plus/test";
 
-import { createAllEnvironmentProjectSnapshotsReadyAtom } from "./shell";
+import { createWorkspaceLock } from "../workspaceLock";
+import { createAllEnvironmentProjectSnapshotsReadyAtom, lockEnvironmentShellAtoms } from "./shell";
 
 const LOCAL = EnvironmentId.make("local");
 const REMOTE = EnvironmentId.make("remote");
@@ -131,6 +140,111 @@ describe("project snapshot readiness", () => {
     expect(registry.get(ready)).toBe(false);
     registry.set(catalog, catalogState([LOCAL]));
     expect(registry.get(ready)).toBe(true);
+    registry.dispose();
+  });
+});
+
+describe("workspace-locked shell atoms", () => {
+  const NOW = "2026-09-24T00:00:00.000Z";
+  const lock = createWorkspaceLock({
+    workspace: { workspaceRoot: "/work/app", aliases: [], platform: "darwin", label: "app" },
+    environment: {
+      environmentId: LOCAL,
+      label: "Local",
+      httpBaseUrl: "http://127.0.0.1:3773",
+      wsBaseUrl: "ws://127.0.0.1:3773",
+      bearerToken: "token",
+    },
+  });
+  const project = (id: string, workspaceRoot: string): OrchestrationProjectShell => ({
+    id: ProjectId.make(id),
+    title: id,
+    workspaceRoot,
+    defaultModelSelection: null,
+    scripts: [],
+    createdAt: NOW,
+    updatedAt: NOW,
+  });
+  const thread = (id: string, projectId: string) =>
+    ({ id: ThreadId.make(id), projectId: ProjectId.make(projectId) }) as OrchestrationThreadShell;
+  const app = project("app", "/work/app");
+  const other = project("other", "/work/other");
+  const appThread = thread("t1", "app");
+  const liveState = (
+    projects: OrchestrationShellSnapshot["projects"],
+    threads: OrchestrationShellSnapshot["threads"],
+  ): EnvironmentShellState => ({
+    status: "live",
+    snapshot: Option.some({ snapshotSequence: 1, updatedAt: NOW, projects, threads }),
+    error: Option.none(),
+  });
+
+  function makeLockedHarness() {
+    const unlocked = Atom.family((_environmentId: EnvironmentId) =>
+      Atom.make<AsyncResult.AsyncResult<EnvironmentShellState, string>>(AsyncResult.initial()),
+    );
+    const locked = lockEnvironmentShellAtoms(unlocked, () => lock);
+    const registry = AtomRegistry.make();
+    const lockedSnapshot = (environmentId: EnvironmentId) =>
+      Option.getOrThrow(registry.get(locked.stateValueAtom(environmentId)).snapshot);
+    return { unlocked, locked, registry, lockedSnapshot };
+  }
+
+  it("passes a shell with nothing outside the lock through unchanged", () => {
+    const { unlocked, locked, registry } = makeLockedHarness();
+    const result = AsyncResult.success(liveState([app], [appThread]));
+    registry.set(unlocked(LOCAL), result);
+
+    expect(registry.get(locked.stateAtom(LOCAL))).toBe(result);
+    registry.dispose();
+  });
+
+  it("keeps the locked arrays when only hidden projects change", () => {
+    const { unlocked, registry, lockedSnapshot } = makeLockedHarness();
+    registry.set(
+      unlocked(LOCAL),
+      AsyncResult.success(liveState([app, other], [appThread, thread("t2", "other")])),
+    );
+    const first = lockedSnapshot(LOCAL);
+    expect(first.projects).toEqual([app]);
+    expect(first.threads).toEqual([appThread]);
+
+    registry.set(
+      unlocked(LOCAL),
+      AsyncResult.success(
+        liveState([app, other], [appThread, thread("t2", "other"), thread("t3", "other")]),
+      ),
+    );
+    const second = lockedSnapshot(LOCAL);
+    expect(second.projects).toBe(first.projects);
+    expect(second.threads).toBe(first.threads);
+    registry.dispose();
+  });
+
+  it("filters the last good shell a failure carries", () => {
+    const { unlocked, locked, registry } = makeLockedHarness();
+    registry.set(
+      unlocked(LOCAL),
+      AsyncResult.failure(Cause.fail("disconnected"), {
+        previousSuccess: Option.some(
+          AsyncResult.success(liveState([app, other], [appThread, thread("t2", "other")])),
+        ),
+      }),
+    );
+
+    const result = registry.get(locked.stateAtom(LOCAL));
+    expect(result._tag).toBe("Failure");
+    const snapshot = Option.getOrThrow(Option.getOrThrow(AsyncResult.value(result)).snapshot);
+    expect(snapshot.projects).toEqual([app]);
+    expect(snapshot.threads).toEqual([appThread]);
+    registry.dispose();
+  });
+
+  it("empties other environments", () => {
+    const { unlocked, registry, lockedSnapshot } = makeLockedHarness();
+    registry.set(unlocked(REMOTE), AsyncResult.success(liveState([app], [appThread])));
+
+    expect(lockedSnapshot(REMOTE)).toMatchObject({ projects: [], threads: [] });
     registry.dispose();
   });
 });

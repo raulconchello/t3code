@@ -9,7 +9,15 @@ import type {
 } from "@t3tools/contracts";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 
-import { readEmbedHost } from "./embedHost";
+import { EMBED_HOST_BUILD, readEmbedHost } from "./embedHost";
+
+/**
+ * `isWorkspaceLocked`: whether the app runs under a workspace lock. Every
+ * embedded build does, since it only starts once the host's init, which names
+ * the workspace, has arrived. It is the build-time flag itself (a re-export,
+ * not a copy) so stock builds fold it to `false` and drop the lock code.
+ */
+export { EMBED_HOST_BUILD as isWorkspaceLocked };
 
 /**
  * The folder an embedded app is locked to. Under a lock the app only shows and
@@ -49,8 +57,13 @@ export function createWorkspaceLock(
 
 let workspaceLock: WorkspaceLock | null = null;
 
-/** The lock for this page, or null outside an embedded build. Stable for the page's lifetime. */
+/**
+ * The lock for this page, or null outside an embedded build. Stable for the
+ * page's lifetime. Read it when used, not at module load: a module can be
+ * evaluated before the host's init arrives.
+ */
 export function readWorkspaceLock(): WorkspaceLock | null {
+  if (!EMBED_HOST_BUILD) return null;
   if (workspaceLock === null) {
     const embedHost = readEmbedHost();
     if (embedHost !== null) workspaceLock = createWorkspaceLock(embedHost);

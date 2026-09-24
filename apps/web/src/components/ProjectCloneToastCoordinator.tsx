@@ -16,12 +16,12 @@ import { useCallback, useEffect, useRef } from "react";
 
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useRemoveClonedProject } from "../hooks/useRemoveClonedProject";
-import { useWorkspaceLock } from "../hooks/useWorkspaceLock";
 import { useEnvironments } from "../state/environments";
 import { useEnvironmentProjectClones } from "../state/projectClones";
 import { sourceControlEnvironment } from "../state/sourceControl";
 import { useAtomCommand } from "../state/use-atom-command";
 import { type DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { isWorkspaceLocked } from "../workspaceLock";
 import { toastManager } from "./ui/toast";
 import { stackedThreadToast } from "./ui/toastHelpers";
 
@@ -34,8 +34,7 @@ import { stackedThreadToast } from "./ui/toastHelpers";
 export function ProjectCloneToastCoordinator() {
   const { environments } = useEnvironments();
   // Clones add other projects, which a workspace lock never shows.
-  const workspaceLocked = useWorkspaceLock() !== null;
-  if (workspaceLocked) return null;
+  if (isWorkspaceLocked) return null;
   return environments.map((environment) => (
     <EnvironmentCloneToasts
       key={environment.environmentId}

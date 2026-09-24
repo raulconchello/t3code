@@ -7,9 +7,9 @@ import { useCallback, useMemo } from "react";
 
 import { openCommandPalette } from "~/commandPaletteBus";
 import { useClientSettings } from "~/hooks/useSettings";
-import { useWorkspaceLock } from "~/hooks/useWorkspaceLock";
 import { hasExplicitComposerModelSelection } from "~/lib/chatThreadActions";
 import { selectProjectGroupingSettings } from "~/logicalProject";
+import { isWorkspaceLocked } from "~/workspaceLock";
 import {
   buildSidebarProjectPickerEntries,
   buildSidebarProjectSnapshots,
@@ -57,8 +57,6 @@ export function DraftHeroHeadline({
   const applyStickyState = useComposerDraftStore((store) => store.applyStickyState);
   const setModelSelection = useComposerDraftStore((store) => store.setModelSelection);
   const openAddProject = useCallback(() => openCommandPalette({ open: "add-project" }), []);
-  // A workspace lock has no other project to add.
-  const workspaceLocked = useWorkspaceLock() !== null;
 
   const environmentLabelById = useMemo(
     () =>
@@ -217,7 +215,8 @@ export function DraftHeroHeadline({
             );
           })}
         </MenuRadioGroup>
-        {workspaceLocked ? null : (
+        {/* A workspace lock has no other project to add. */}
+        {isWorkspaceLocked ? null : (
           <>
             <MenuSeparator />
             <MenuItem onClick={openAddProject}>

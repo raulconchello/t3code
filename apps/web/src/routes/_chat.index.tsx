@@ -24,6 +24,7 @@ import {
   useThreadShells,
 } from "../state/entities";
 import { useEnvironment, useEnvironments } from "../state/environments";
+import { isWorkspaceLocked } from "../workspaceLock";
 import { APP_DISPLAY_NAME } from "~/branding";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 
@@ -34,7 +35,7 @@ function ChatIndexRouteView() {
 
   // Under a workspace lock the only project is the workspace's own, so there
   // is no onboarding or project picker to fall back to.
-  if (workspaceLock !== null && workspaceLock.projectRef === null) {
+  if (isWorkspaceLocked && workspaceLock !== null && workspaceLock.projectRef === null) {
     return <WorkspaceLockLandingState workspaceLock={workspaceLock} />;
   }
 

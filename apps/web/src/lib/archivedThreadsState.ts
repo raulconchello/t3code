@@ -10,7 +10,7 @@ import { useCallback, useMemo } from "react";
 
 import { orchestrationEnvironment } from "../state/orchestration";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { lockShellSnapshot, readWorkspaceLock, type WorkspaceLock } from "../workspaceLock";
+import { isWorkspaceLocked, lockShellSnapshot, readWorkspaceLock } from "../workspaceLock";
 
 function archivedSnapshotAtom(environmentId: EnvironmentId) {
   return orchestrationEnvironment.archivedShellSnapshot({
@@ -20,20 +20,18 @@ function archivedSnapshotAtom(environmentId: EnvironmentId) {
 }
 
 // Archived threads outside the workspace lock stay hidden, like live ones.
-function lockArchivedSnapshotAtoms(lock: WorkspaceLock) {
-  return Atom.family((environmentId: EnvironmentId) =>
-    Atom.make((get) =>
-      AsyncResult.map(get(archivedSnapshotAtom(environmentId)), (snapshot) =>
-        lockShellSnapshot(snapshot, environmentId, lock),
-      ),
-    ).pipe(Atom.withLabel(`web:archived-thread-snapshot-locked:${environmentId}`)),
-  );
-}
+const lockedArchivedSnapshotAtom = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make((get) => {
+    const result = get(archivedSnapshotAtom(environmentId));
+    const lock = readWorkspaceLock();
+    return lock === null
+      ? result
+      : AsyncResult.map(result, (snapshot) => lockShellSnapshot(snapshot, environmentId, lock));
+  }).pipe(Atom.withLabel(`web:archived-thread-snapshot-locked:${environmentId}`)),
+);
 
-const workspaceLock = readWorkspaceLock();
 const archivedSnapshotsAtom = createArchivedThreadSnapshotsAtomFamily({
-  getSnapshotAtom:
-    workspaceLock === null ? archivedSnapshotAtom : lockArchivedSnapshotAtoms(workspaceLock),
+  getSnapshotAtom: isWorkspaceLocked ? lockedArchivedSnapshotAtom : archivedSnapshotAtom,
   labelPrefix: "web:archived-thread-snapshots",
 });
 

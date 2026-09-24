@@ -4,9 +4,9 @@ import { memo, useCallback } from "react";
 import { Link, useCanGoBack, useLocation, useNavigate } from "@tanstack/react-router";
 
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
-import { useWorkspaceLock } from "../../hooks/useWorkspaceLock";
 import { cn } from "../../lib/utils";
 import { useEnvironments } from "../../state/environments";
+import { isWorkspaceLocked } from "../../workspaceLock";
 import { T3Wordmark } from "../T3Wordmark";
 import {
   resolveEnvironmentIdentificationPillLabel,
@@ -147,12 +147,11 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
               : null,
   });
   const { environments } = useEnvironments();
-  // Pull requests and usage span every project, so a workspace lock leaves them out.
-  const workspaceLocked = useWorkspaceLock() !== null;
   // The page reads every connected server, so one of them offering pull requests is enough for
   // the link to lead somewhere.
   const pullRequestsSupported =
-    !workspaceLocked &&
+    // Pull requests and usage span every project, so a workspace lock leaves them out.
+    !isWorkspaceLocked &&
     environments.some(
       (environment) => environment.serverConfig?.environment.capabilities.pullRequests === true,
     );
@@ -212,7 +211,7 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
               onClick={handlePullRequestsClick}
             />
           ) : null}
-          {workspaceLocked ? null : (
+          {isWorkspaceLocked ? null : (
             <SidebarUtilityItem
               icon={<ChartNoAxesColumnIcon />}
               label="Usage"

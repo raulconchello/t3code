@@ -2,12 +2,16 @@ import { useAtomValue } from "@effect/atom-react";
 import type { EmbedHostStatusPhase, ProjectId, ScopedProjectRef } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { Atom } from "effect/unstable/reactivity";
-import { useMemo } from "react";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentProjects } from "../state/projects";
 import { environmentShell } from "../state/shell";
-import { findLockedProject, readWorkspaceLock, type WorkspaceLock } from "../workspaceLock";
+import {
+  findLockedProject,
+  isWorkspaceLocked,
+  readWorkspaceLock,
+  type WorkspaceLock,
+} from "../workspaceLock";
 
 export interface WorkspaceLockStatus {
   readonly phase: EmbedHostStatusPhase;
@@ -30,25 +34,26 @@ interface LockedProjects {
   readonly projectIds: ReadonlySet<ProjectId> | null;
 }
 
-const workspaceLock = readWorkspaceLock();
 const UNLOADED_LOCKED_PROJECTS: LockedProjects = { projectRef: null, projectIds: null };
 
-const lockSnapshotLoadedAtom = Atom.make(
-  (get) =>
-    workspaceLock !== null &&
-    Option.isSome(get(environmentShell.stateValueAtom(workspaceLock.environmentId)).snapshot),
-).pipe(Atom.withLabel("web-workspace-lock-snapshot-loaded"));
+// These atoms only compute once rendering reads them, after the host's init.
+const lockSnapshotLoadedAtom = Atom.make((get) => {
+  const lock = readWorkspaceLock();
+  return (
+    lock !== null &&
+    Option.isSome(get(environmentShell.stateValueAtom(lock.environmentId)).snapshot)
+  );
+}).pipe(Atom.withLabel("web-workspace-lock-snapshot-loaded"));
 
 // Recomputes only when the locked projects change, not on every thread update.
 const lockedProjectsAtom = Atom.make((get): LockedProjects => {
-  if (workspaceLock === null || !get(lockSnapshotLoadedAtom)) return UNLOADED_LOCKED_PROJECTS;
-  const projects = get(environmentProjects.environmentProjectsAtom(workspaceLock.environmentId));
-  const project = findLockedProject(projects, workspaceLock);
+  const lock = readWorkspaceLock();
+  if (lock === null || !get(lockSnapshotLoadedAtom)) return UNLOADED_LOCKED_PROJECTS;
+  const projects = get(environmentProjects.environmentProjectsAtom(lock.environmentId));
+  const project = findLockedProject(projects, lock);
   return {
     projectRef:
-      project === null
-        ? null
-        : { environmentId: workspaceLock.environmentId, projectId: project.id },
+      project === null ? null : { environmentId: lock.environmentId, projectId: project.id },
     projectIds: new Set(projects.map((candidate) => candidate.id)),
   };
 }).pipe(Atom.withLabel("web-workspace-lock-projects"));
@@ -87,15 +92,25 @@ export function useWorkspaceProjectRequest(): number {
   return useAtomValue(workspaceProjectRequestAtom);
 }
 
-/**
- * The workspace lock of an embedded build, or null everywhere else. Every UI
- * check for the lock goes through here.
- */
-export function useWorkspaceLock(): WorkspaceLockView | null {
-  const { projectRef, projectIds } = useAtomValue(lockedProjectsAtom);
-  const status = useAtomValue(workspaceLockStatusAtom);
-  return useMemo(
-    () => (workspaceLock === null ? null : { lock: workspaceLock, projectRef, projectIds, status }),
-    [projectIds, projectRef, status],
-  );
+const workspaceLockViewAtom = Atom.make((get): WorkspaceLockView | null => {
+  const lock = readWorkspaceLock();
+  return lock === null
+    ? null
+    : { lock, ...get(lockedProjectsAtom), status: get(workspaceLockStatusAtom) };
+}).pipe(Atom.withLabel("web-workspace-lock-view"));
+
+function useLockedWorkspace(): WorkspaceLockView | null {
+  return useAtomValue(workspaceLockViewAtom);
 }
+
+function useNoWorkspaceLock(): WorkspaceLockView | null {
+  return null;
+}
+
+/**
+ * The workspace lock with its projects and status, for UI that needs them;
+ * plain checks use `isWorkspaceLocked`. The lock is fixed for the page's
+ * lifetime, so the implementation is picked once and stock builds subscribe
+ * to nothing.
+ */
+export const useWorkspaceLock = isWorkspaceLocked ? useLockedWorkspace : useNoWorkspaceLock;
