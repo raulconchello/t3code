@@ -2,6 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
+import * as NodeStream from "node:stream";
 
 const MIME_TYPES: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
@@ -142,9 +143,8 @@ function createStaticRequestHandler(input: {
       response.end();
       return;
     }
-    const stream = NodeFS.createReadStream(resolution.filePath);
-    stream.on("error", () => response.destroy());
-    stream.pipe(response);
+    // pipeline closes the file when the client goes away mid-download.
+    NodeStream.pipeline(NodeFS.createReadStream(resolution.filePath), response, () => {});
   };
 }
 
