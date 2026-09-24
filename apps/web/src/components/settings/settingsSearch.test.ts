@@ -177,6 +177,26 @@ describe("searchSettings", () => {
     expect(available.map((item) => item.id).filter((id) => gatedIds.has(id))).toEqual([]);
   });
 
+  it("keeps connections and diagnostics out of search under a workspace lock", () => {
+    const availability = {
+      hasCloudPublicConfig: true,
+      hasEnvironment: true,
+      hasProviderSettingsEnvironment: true,
+      canManageLocalBackend: true,
+      isWslSettingsRowVisible: true,
+      hasThreadAutoSettlement: true,
+    };
+    const reachesPastWorkspace = (item: SettingsSearchItem) =>
+      item.to === "/settings/connections" || item.id === "diagnostics";
+
+    const unlocked = filterAvailableSettingsSearchItems(availability);
+    const locked = filterAvailableSettingsSearchItems({ ...availability, workspaceLocked: true });
+
+    expect(unlocked.some(reachesPastWorkspace)).toBe(true);
+    expect(locked.filter(reachesPastWorkspace)).toEqual([]);
+    expect(locked.map((item) => item.id)).toContain("open-source-licenses");
+  });
+
   it("keeps the local toggle searchable without offering hidden host publishing controls", () => {
     const availability = {
       hasCloudPublicConfig: true,
