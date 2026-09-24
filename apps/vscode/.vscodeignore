@@ -1,0 +1,9 @@
+# Ship only the bundle, the web app, the manifest and its assets.
+**
+!dist/extension.cjs
+!dist/web/**
+!resources/icon.png
+!resources/activity-bar.svg
+!package.json
+!README.md
+!LICENSE

@@ -1,0 +1,138 @@
+{
+  "name": "t3code-vscode",
+  "displayName": "T3 Code",
+  "version": "0.0.42",
+  "private": true,
+  "description": "T3 Code inside VS Code, locked to the folder you have open.",
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pingdotgg/t3code",
+    "directory": "apps/vscode"
+  },
+  "publisher": "t3tools",
+  "type": "module",
+  "main": "./dist/extension.cjs",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vp test run",
+    "smoke-test": "node scripts/smoke-test.ts"
+  },
+  "devDependencies": {
+    "@t3tools/client-runtime": "workspace:*",
+    "@t3tools/contracts": "workspace:*",
+    "@t3tools/shared": "workspace:*",
+    "@t3tools/web": "workspace:*",
+    "@types/node": "catalog:",
+    "@types/vscode": "1.100.0",
+    "@vscode/test-electron": "3.1.0",
+    "effect": "catalog:",
+    "vite-plus": "catalog:"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "t3code.open",
+        "title": "Open",
+        "category": "T3 Code"
+      },
+      {
+        "command": "t3code.connect",
+        "title": "Connect to the Desktop App",
+        "category": "T3 Code"
+      },
+      {
+        "command": "t3code.disconnect",
+        "title": "Disconnect",
+        "category": "T3 Code"
+      },
+      {
+        "command": "t3code.reload",
+        "title": "Reload",
+        "category": "T3 Code"
+      }
+    ],
+    "configuration": {
+      "title": "T3 Code",
+      "properties": {
+        "t3code.homeDir": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "T3 Code home directory. Leave empty to use `T3CODE_HOME` or `~/.t3`, like the desktop app."
+        },
+        "t3code.desktopAppPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Path to the T3 Code desktop app. Leave empty to look in `/Applications` and `~/Applications`."
+        },
+        "t3code.serverCommand": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine",
+          "markdownDescription": "For development only. Command that runs a T3 Code server CLI instead of the desktop app's bundled one, as a list of arguments. It must be exactly the running server's version, or pairing is refused."
+        }
+      }
+    },
+    "views": {
+      "t3code": [
+        {
+          "id": "t3code.welcome",
+          "name": "T3 Code"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "t3code",
+          "title": "T3 Code",
+          "icon": "resources/activity-bar.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "t3code.welcome",
+        "contents": "Chat with your coding agents about this folder. Threads and new chats stay in this folder's project.\n[Open T3 Code for this folder](command:t3code.open)",
+        "when": "workbenchState != empty && !remoteName"
+      },
+      {
+        "view": "t3code.welcome",
+        "contents": "Open a folder to use T3 Code.\n[Open Folder](command:vscode.openFolder)",
+        "when": "workbenchState == empty && !remoteName"
+      },
+      {
+        "view": "t3code.welcome",
+        "contents": "T3 Code works in local windows only for now. Open this folder in a local window to use it.",
+        "when": "remoteName"
+      }
+    ]
+  },
+  "activationEvents": [
+    "onStartupFinished",
+    "onWebviewPanel:t3code.workspace"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "icon": "resources/icon.png",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "T3 Code runs coding agents in this folder."
+    },
+    "virtualWorkspaces": false
+  }
+}
