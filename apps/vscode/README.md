@@ -26,11 +26,11 @@ The first time you open a folder, T3 Code adds it as a project. In a multi-root 
 
 - `t3code.homeDir`: the T3 Code data directory, if you changed it from the default (`T3CODE_HOME` or `~/.t3`).
 - `t3code.desktopAppPath`: where the desktop app is installed, if it isn't in `/Applications` or `~/Applications`.
-- `t3code.serverCommand`: a command that runs the T3 Code server CLI, for setups without the desktop app.
 
 ## Troubleshooting
 
 - **"The T3 Code desktop app isn't running."** Start the desktop app, then choose **Retry**.
+- **"No installed T3 Code app matches the running server."** VS Code pairs only through a desktop app of exactly the running version. Restart the desktop app after an update, or run **T3 Code: Connect to the Desktop App** and paste a pairing link.
 - **A version warning.** The extension ships its own copy of the T3 Code interface. When the desktop app has a different version, most things keep working; update both if something looks wrong.
 - **VS Code shortcuts don't work inside the tab.** Keyboard focus belongs to T3 Code while you type in it. Click outside the tab to use VS Code shortcuts.
 - **Drafts and layout differ per folder.** Each folder keeps its own T3 Code interface state.

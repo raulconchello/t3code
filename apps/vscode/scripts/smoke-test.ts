@@ -6,9 +6,9 @@
  *
  *   node scripts/smoke-test.ts
  *
- * T3CODE_SMOKE_VSCODE overrides the VS Code executable, T3CODE_SMOKE_SUITE
- * the suite that runs inside VS Code, and T3CODE_SMOKE_KEEP=1 keeps the
- * temporary directory for inspection.
+ * T3CODE_SMOKE_VSCODE overrides the VS Code executable, T3CODE_SMOKE_DESKTOP_APP
+ * the desktop app, T3CODE_SMOKE_SUITE the suite that runs inside VS Code, and
+ * T3CODE_SMOKE_KEEP=1 keeps the temporary directory for inspection.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -16,10 +16,13 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { runTests } from "@vscode/test-electron";
 
-import { findServerCli } from "../src/pairingCli.ts";
+import {
+  type ServerCliCommand,
+  desktopAppCandidates,
+  resolveDesktopAppCli,
+} from "../src/pairingCli.ts";
 
 const SANDBOX_PORT = 38773;
 const appDir = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
@@ -67,12 +70,20 @@ NodeFS.writeFileSync(
   ),
 );
 
-const cli = await findServerCli({
-  serverCommand: [],
-  desktopAppPath: undefined,
+// The throwaway server can be any installed app: its home is fresh, so nothing is migrated.
+// The extension's own pairing then checks the CLI against this server's version.
+let cli: ServerCliCommand | null = null;
+for (const candidate of desktopAppCandidates({
+  setting: process.env.T3CODE_SMOKE_DESKTOP_APP,
+  runningApp: null,
   homeDirectory: NodeOS.homedir(),
-  platform: HostProcessPlatform.defaultValue(),
-});
+})) {
+  cli ??= await resolveDesktopAppCli(candidate);
+}
+if (cli === null) {
+  console.error("No T3 Code desktop app found to run the sandbox server.");
+  process.exit(1);
+}
 const serverLog = NodeFS.openSync(NodePath.join(sandbox, "server.log"), "a");
 const server = NodeChildProcess.spawn(
   cli.command,

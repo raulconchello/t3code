@@ -483,6 +483,9 @@ class T3CodeController implements vscode.Disposable {
           cli: await findServerCli({
             serverCommand: config.get<ReadonlyArray<string>>("serverCommand") ?? [],
             desktopAppPath: config.get<string>("desktopAppPath"),
+            serverPid: server.pid,
+            serverVersion: server.serverVersion,
+            home: server.home,
             homeDirectory: NodeOS.homedir(),
             platform: this.platform,
           }),

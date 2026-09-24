@@ -78,7 +78,7 @@
           },
           "default": [],
           "scope": "machine",
-          "markdownDescription": "Advanced. Command that runs the T3 Code server CLI instead of the desktop app's bundled one, for example `[\"node\", \"/path/to/t3code/apps/server/dist/bin.mjs\"]`. Pairing arguments are appended."
+          "markdownDescription": "For development only. Command that runs a T3 Code server CLI instead of the desktop app's bundled one, as a list of arguments. It must be exactly the running server's version, or pairing is refused."
         }
       }
     },

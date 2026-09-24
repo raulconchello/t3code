@@ -133,6 +133,7 @@ describe("discoverDesktopServer", () => {
       _tag: "Found",
       server: {
         home,
+        pid: process.pid,
         environmentId: "env-desktop",
         label: "Studio Mac",
         serverVersion: "0.0.42",

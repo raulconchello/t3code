@@ -16,36 +16,25 @@ export interface ServerCliCommand {
 /** Product names the desktop app has shipped under, most likely first. */
 const DESKTOP_APP_BUNDLE_NAMES = ["T3 Code (Alpha).app", "T3 Code.app", "T3 Code (Nightly).app"];
 
-/** Where to look for the desktop app: the setting, then /Applications, then ~/Applications. */
+/**
+ * Where to look for the desktop app: the setting, then the app running the
+ * server, then /Applications, then ~/Applications.
+ */
 export function desktopAppCandidates(input: {
   readonly setting: string | undefined;
+  readonly runningApp: string | null;
   readonly homeDirectory: string;
 }): ReadonlyArray<string> {
   const configured = input.setting?.trim() ?? "";
   const searchDirs = ["/Applications", NodePath.join(input.homeDirectory, "Applications")];
-  return [
+  const candidates = [
     ...(configured.length > 0 ? [configured] : []),
+    ...(input.runningApp ? [input.runningApp] : []),
     ...searchDirs.flatMap((dir) =>
       DESKTOP_APP_BUNDLE_NAMES.map((name) => NodePath.join(dir, name)),
     ),
   ];
-}
-
-const XML_ENTITIES: Record<string, string> = {
-  amp: "&",
-  lt: "<",
-  gt: ">",
-  quot: '"',
-  apos: "'",
-};
-
-/** Reads CFBundleExecutable from an XML Info.plist. */
-export function parseBundleExecutable(plist: string): string | null {
-  const match = /<key>CFBundleExecutable<\/key>\s*<string>([^<]*)<\/string>/.exec(plist);
-  const value = match?.[1]?.replace(/&(amp|lt|gt|quot|apos);/g, (_, name: string) => {
-    return XML_ENTITIES[name] ?? "";
-  });
-  return value && value.trim().length > 0 ? value : null;
+  return [...new Set(candidates.map((candidate) => NodePath.resolve(candidate)))];
 }
 
 const execFile = (
@@ -68,15 +57,19 @@ const execFile = (
     );
   });
 
-const readInfoPlist = async (plistPath: string): Promise<string> => {
-  const bytes = await NodeFSP.readFile(plistPath);
-  if (bytes.subarray(0, 6).toString("latin1") !== "bplist") {
-    return bytes.toString("utf8");
-  }
-  // Binary plists need macOS's own converter.
-  const { stdout } = await execFile("plutil", ["-convert", "xml1", "-o", "-", plistPath], {});
-  return stdout;
-};
+/** The `.app` bundle an executable belongs to, if it is a macOS app's main binary. */
+export function appBundleOfExecutable(executablePath: string): string | null {
+  const match = /^(.+?\.app)\/Contents\/MacOS\/[^/]+$/.exec(executablePath.trim());
+  return match?.[1] ?? null;
+}
+
+/** The app bundle running a process (the desktop app runs its server with its own binary). */
+async function runningAppBundle(pid: number): Promise<string | null> {
+  const output = await execFile("ps", ["-ww", "-o", "comm=", "-p", String(pid)], {}).catch(
+    () => null,
+  );
+  return output === null ? null : appBundleOfExecutable(output.stdout);
+}
 
 const isFile = async (filePath: string) =>
   NodeFSP.stat(filePath).then(
@@ -93,14 +86,19 @@ const exists = async (filePath: string) =>
   );
 
 /**
- * The server CLI bundled inside a desktop app: its Electron binary running
- * `app.asar/apps/server/dist/bin.mjs` as Node (apps/desktop/src/backend/DesktopBackendConfiguration.ts).
+ * The server CLI bundled inside a desktop app: its Electron binary (named by
+ * CFBundleExecutable) running `app.asar/apps/server/dist/bin.mjs` as Node
+ * (apps/desktop/src/backend/DesktopBackendConfiguration.ts). macOS only.
  */
 export async function resolveDesktopAppCli(appPath: string): Promise<ServerCliCommand | null> {
   const contents = NodePath.join(appPath, "Contents");
-  const plist = await readInfoPlist(NodePath.join(contents, "Info.plist")).catch(() => null);
-  const executable = plist === null ? null : parseBundleExecutable(plist);
-  if (executable === null) {
+  const plist = await execFile(
+    "plutil",
+    ["-extract", "CFBundleExecutable", "raw", "-o", "-", NodePath.join(contents, "Info.plist")],
+    {},
+  ).catch(() => null);
+  const executable = plist?.stdout.trim();
+  if (!executable) {
     return null;
   }
   const binary = NodePath.join(contents, "MacOS", executable);
@@ -115,33 +113,85 @@ class PairingCliError extends Error {
   override readonly name = "PairingCliError";
 }
 
-/** Picks the CLI to mint with: the `t3code.serverCommand` override, else the installed desktop app. */
+const cliEnv = () => ({ ...process.env, ELECTRON_RUN_AS_NODE: "1" });
+
+/** Parses `t3 --version` output (`t3 v0.0.42`) into the bare version. */
+export function parseCliVersionOutput(stdout: string): string | null {
+  const lastLine = stdout.trim().split("\n").at(-1)?.trim() ?? "";
+  const match = /^\S+\s+v?(\d\S*)$/.exec(lastLine);
+  return match?.[1] ?? null;
+}
+
+/** Runs `<cli> --version`, which loads no state, and returns the server version it bundles. */
+export async function readServerCliVersion(
+  cli: ServerCliCommand,
+  cwd: string,
+): Promise<string | null> {
+  const output = await execFile(cli.command, [...cli.args, "--version"], {
+    cwd,
+    env: cliEnv(),
+    timeout: 15_000,
+    windowsHide: true,
+  }).catch(() => null);
+  return output === null ? null : parseCliVersionOutput(output.stdout);
+}
+
+const describeVersion = (version: string | null) =>
+  version ? `version ${version}` : "an unknown version";
+
+/**
+ * Picks the CLI to mint with: the `t3code.serverCommand` override, else a
+ * desktop app from `desktopAppCandidates`. Every CLI must bundle exactly the
+ * running server's version. `auth pairing create` opens and migrates the T3
+ * home's database, so a different version (say Nightly next to Alpha, which
+ * share ~/.t3) could migrate the live database under the running server.
+ */
 export async function findServerCli(input: {
   readonly serverCommand: ReadonlyArray<string>;
   readonly desktopAppPath: string | undefined;
+  readonly serverPid: number;
+  readonly serverVersion: string;
+  readonly home: string;
   readonly homeDirectory: string;
   readonly platform: NodeJS.Platform;
+  readonly readVersion?: (cli: ServerCliCommand) => Promise<string | null>;
 }): Promise<ServerCliCommand> {
+  const readVersion = input.readVersion ?? ((cli) => readServerCliVersion(cli, input.home));
+
   const [command, ...args] = input.serverCommand.filter((part) => part.trim().length > 0);
   if (command !== undefined) {
-    return { command, args };
+    const cli = { command, args };
+    const version = await readVersion(cli);
+    if (version !== input.serverVersion) {
+      throw new PairingCliError(
+        `Won't pair with t3code.serverCommand: it is ${describeVersion(version)}, but the running T3 Code server is version ${input.serverVersion}. Fix the setting, or paste a pairing link instead.`,
+      );
+    }
+    return cli;
   }
   if (input.platform !== "darwin") {
     throw new PairingCliError(
-      "Finding the desktop app automatically works on macOS only. Set t3code.serverCommand, or paste a pairing link with T3 Code: Connect to the Desktop App.",
+      "Pairing automatically works on macOS only. Paste a pairing link from the T3 Code desktop app instead.",
     );
   }
-  for (const candidate of desktopAppCandidates({
+
+  const mismatches: string[] = [];
+  const candidates = desktopAppCandidates({
     setting: input.desktopAppPath,
+    runningApp: await runningAppBundle(input.serverPid),
     homeDirectory: input.homeDirectory,
-  })) {
+  });
+  for (const candidate of candidates) {
     const cli = await resolveDesktopAppCli(candidate);
-    if (cli !== null) {
-      return cli;
-    }
+    if (cli === null) continue;
+    const version = await readVersion(cli);
+    if (version === input.serverVersion) return cli;
+    mismatches.push(`${candidate} is ${describeVersion(version)}`);
   }
   throw new PairingCliError(
-    "Couldn't find the T3 Code desktop app in /Applications or ~/Applications. Set t3code.desktopAppPath to where it is installed.",
+    mismatches.length > 0
+      ? `No installed T3 Code app matches the running server (version ${input.serverVersion}): ${mismatches.join("; ")}. Paste a pairing link from the desktop app instead.`
+      : "Couldn't find the T3 Code desktop app in /Applications or ~/Applications. Set t3code.desktopAppPath to where it is installed, or paste a pairing link.",
   );
 }
 
@@ -193,7 +243,7 @@ export async function mintPairingToken(input: {
       [...input.cli.args, ...pairingCreateArgs(input.home)],
       {
         cwd: input.home,
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        env: cliEnv(),
         timeout: input.timeoutMs ?? 30_000,
         windowsHide: true,
       },

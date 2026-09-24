@@ -34,6 +34,8 @@ const decodeServerRuntimeState = Schema.decodeUnknownOption(
 /** The desktop app's server, checked and ready to pair with. */
 export interface DesktopServer {
   readonly home: string;
+  /** The server process, from the runtime file. */
+  readonly pid: number;
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly serverVersion: string;
@@ -153,6 +155,7 @@ export async function discoverDesktopServer(
     _tag: "Found",
     server: {
       home,
+      pid: state.pid,
       environmentId: descriptor.success.environmentId,
       label: descriptor.success.label,
       serverVersion: descriptor.success.serverVersion,

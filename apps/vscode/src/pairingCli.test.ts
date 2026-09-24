@@ -1,19 +1,26 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Builds fake app bundles and CLIs on disk.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { afterEach, assert, describe, it } from "vite-plus/test";
 
 import {
+  type ServerCliCommand,
+  appBundleOfExecutable,
   desktopAppCandidates,
   findServerCli,
   mintPairingToken,
   pairingCreateArgs,
-  parseBundleExecutable,
+  parseCliVersionOutput,
   parsePairingCliOutput,
+  readServerCliVersion,
   resolveDesktopAppCli,
 } from "./pairingCli.ts";
+
+const isMac = HostProcessPlatform.defaultValue() === "darwin";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -21,7 +28,7 @@ afterEach(() => {
 });
 
 const tempDir = (prefix: string) => {
-  const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), prefix));
+  const dir = NodeFS.realpathSync(NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), prefix)));
   cleanups.push(() => NodeFS.rmSync(dir, { recursive: true, force: true }));
   return dir;
 };
@@ -37,15 +44,34 @@ const infoPlist = (executable: string) => `<?xml version="1.0" encoding="UTF-8"?
 </dict>
 </plist>`;
 
-/** A minimal .app with the files the extension looks for. */
+/** A minimal .app whose main binary is a link to this Node, so it can really run. */
 const makeAppBundle = (dir: string, name: string, executable: string) => {
   const app = NodePath.join(dir, name);
   NodeFS.mkdirSync(NodePath.join(app, "Contents", "MacOS"), { recursive: true });
   NodeFS.mkdirSync(NodePath.join(app, "Contents", "Resources"), { recursive: true });
   NodeFS.writeFileSync(NodePath.join(app, "Contents", "Info.plist"), infoPlist(executable));
-  NodeFS.writeFileSync(NodePath.join(app, "Contents", "MacOS", executable), "");
+  NodeFS.symlinkSync(process.execPath, NodePath.join(app, "Contents", "MacOS", executable));
   NodeFS.writeFileSync(NodePath.join(app, "Contents", "Resources", "app.asar"), "");
   return app;
+};
+
+const cliOf = (app: string, executable: string): ServerCliCommand => ({
+  command: NodePath.join(app, "Contents", "MacOS", executable),
+  args: [
+    NodePath.join(app, "Contents", "Resources", "app.asar", "apps", "server", "dist", "bin.mjs"),
+  ],
+});
+
+/** Runs a process from a bundle's binary, like the desktop app runs its server. */
+const runFromBundle = (app: string, executable: string) => {
+  const child = NodeChildProcess.spawn(
+    NodePath.join(app, "Contents", "MacOS", executable),
+    ["-e", "setInterval(() => {}, 1000)"],
+    { stdio: "ignore" },
+  );
+  cleanups.push(() => child.kill());
+  if (child.pid === undefined) throw new Error("no pid");
+  return child.pid;
 };
 
 // What `t3 auth pairing create --json` prints (apps/server/src/cliAuthFormat.ts).
@@ -80,65 +106,178 @@ describe("parsePairingCliOutput", () => {
   });
 });
 
-describe("parseBundleExecutable", () => {
-  it("reads CFBundleExecutable, decoding XML entities", () => {
-    assert.equal(parseBundleExecutable(infoPlist("T3 Code (Alpha)")), "T3 Code (Alpha)");
-    assert.equal(parseBundleExecutable(infoPlist("T3 &amp; Co")), "T3 & Co");
-    assert.isNull(parseBundleExecutable("<plist><dict></dict></plist>"));
+describe("parseCliVersionOutput", () => {
+  it("reads the version `t3 --version` prints", () => {
+    assert.equal(parseCliVersionOutput("t3 v0.0.42\n"), "0.0.42");
+    assert.equal(
+      parseCliVersionOutput("t3 v0.0.43-nightly.20260924.1\n"),
+      "0.0.43-nightly.20260924.1",
+    );
+    assert.isNull(parseCliVersionOutput(""));
+    assert.isNull(parseCliVersionOutput("Error: unknown flag --version\nusage: t3"));
+  });
+});
+
+describe("appBundleOfExecutable", () => {
+  it("finds the .app of a main binary only", () => {
+    assert.equal(
+      appBundleOfExecutable("/Applications/T3 Code (Alpha).app/Contents/MacOS/T3 Code (Alpha)\n"),
+      "/Applications/T3 Code (Alpha).app",
+    );
+    assert.isNull(appBundleOfExecutable("/usr/local/bin/node"));
+    assert.isNull(appBundleOfExecutable("/Applications/T3.app/Contents/Resources/helper"));
   });
 });
 
 describe("desktopAppCandidates", () => {
-  it("tries the setting, then /Applications, then ~/Applications", () => {
+  it("tries the setting, the running app, then /Applications and ~/Applications", () => {
     const candidates = desktopAppCandidates({
       setting: "/Volumes/Apps/T3.app",
+      runningApp: "/Users/alice/Applications/T3 Code (Nightly).app",
       homeDirectory: "/Users/alice",
     });
-    assert.deepEqual(candidates.slice(0, 3), [
+    assert.deepEqual(candidates.slice(0, 4), [
       "/Volumes/Apps/T3.app",
+      "/Users/alice/Applications/T3 Code (Nightly).app",
       "/Applications/T3 Code (Alpha).app",
       "/Applications/T3 Code.app",
     ]);
     assert.include(candidates, "/Users/alice/Applications/T3 Code (Alpha).app");
-    assert.isTrue(
-      candidates.indexOf("/Applications/T3 Code.app") <
-        candidates.indexOf("/Users/alice/Applications/T3 Code (Alpha).app"),
+    assert.equal(
+      candidates.filter((candidate) => candidate.endsWith("T3 Code (Nightly).app")).length,
+      2,
+      "the running app is listed once, ahead of the same folder's scan",
     );
   });
 });
 
-describe("findServerCli", () => {
-  it("uses the serverCommand override as is", async () => {
-    assert.deepEqual(
-      await findServerCli({
-        serverCommand: ["node", "/repo/apps/server/dist/bin.mjs"],
-        desktopAppPath: undefined,
-        homeDirectory: "/Users/alice",
-        platform: "linux",
-      }),
-      { command: "node", args: ["/repo/apps/server/dist/bin.mjs"] },
+describe("readServerCliVersion", () => {
+  it("runs `--version` as Node and parses the reply", async () => {
+    const dir = tempDir("t3code-vscode-version-");
+    const record = NodePath.join(dir, "invocation.json");
+    const script = NodePath.join(dir, "cli.mjs");
+    NodeFS.writeFileSync(
+      script,
+      `import * as fs from "node:fs";
+fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({ args: process.argv.slice(2), electronRunAsNode: process.env.ELECTRON_RUN_AS_NODE }));
+console.log("t3 v9.9.9");
+`,
     );
+    assert.equal(
+      await readServerCliVersion({ command: process.execPath, args: [script] }, dir),
+      "9.9.9",
+    );
+    assert.deepEqual(JSON.parse(NodeFS.readFileSync(record, "utf8")), {
+      args: ["--version"],
+      electronRunAsNode: "1",
+    });
   });
 
-  it("runs the app's own binary from its Info.plist against app.asar", async () => {
+  it("returns null when the CLI fails", async () => {
+    const dir = tempDir("t3code-vscode-version-");
+    const script = NodePath.join(dir, "cli.mjs");
+    NodeFS.writeFileSync(script, "process.exit(2);");
+    assert.isNull(await readServerCliVersion({ command: process.execPath, args: [script] }, dir));
+  });
+});
+
+describe("findServerCli", () => {
+  const base = {
+    desktopAppPath: undefined,
+    serverPid: process.pid,
+    serverVersion: "0.0.42",
+    home: "/tmp/t3-home",
+    homeDirectory: "/nowhere",
+  };
+
+  it("uses the serverCommand override when it is the server's version", async () => {
+    const cli = { command: "node", args: ["/repo/apps/server/dist/bin.mjs"] };
+    const checked: ServerCliCommand[] = [];
+    assert.deepEqual(
+      await findServerCli({
+        ...base,
+        serverCommand: [cli.command, ...cli.args],
+        platform: "linux",
+        readVersion: async (candidate) => {
+          checked.push(candidate);
+          return "0.0.42";
+        },
+      }),
+      cli,
+    );
+    assert.deepEqual(checked, [cli]);
+  });
+
+  it("refuses a serverCommand of another version", async () => {
+    const error = await findServerCli({
+      ...base,
+      serverCommand: ["node", "/old/bin.mjs"],
+      platform: "darwin",
+      readVersion: async () => "0.0.41",
+    }).catch((cause: unknown) => cause);
+    assert.instanceOf(error, Error);
+    assert.include((error as Error).message, "version 0.0.41");
+    assert.include((error as Error).message, "version 0.0.42");
+  });
+
+  it("offers pasting a link where it can't look for the app", async () => {
+    const error = await findServerCli({
+      ...base,
+      serverCommand: [],
+      platform: "linux",
+      readVersion: async () => "0.0.42",
+    }).catch((cause: unknown) => cause);
+    assert.instanceOf(error, Error);
+    assert.include((error as Error).message, "Paste a pairing link");
+  });
+
+  it.runIf(isMac)(
+    "skips an app of another version and uses the one running the server",
+    async () => {
+      const dir = tempDir("t3code-vscode-apps-");
+      const nightly = makeAppBundle(dir, "Nightly.app", "Nightly");
+      const alpha = makeAppBundle(dir, "Alpha.app", "Alpha");
+      const versions = new Map([
+        [cliOf(nightly, "Nightly").command, "0.0.43-nightly"],
+        [cliOf(alpha, "Alpha").command, "0.0.42"],
+      ]);
+      const checked: string[] = [];
+      const cli = await findServerCli({
+        ...base,
+        desktopAppPath: nightly,
+        serverPid: runFromBundle(alpha, "Alpha"),
+        serverCommand: [],
+        platform: "darwin",
+        readVersion: async (candidate) => {
+          checked.push(candidate.command);
+          return versions.get(candidate.command) ?? null;
+        },
+      });
+      assert.deepEqual(cli, cliOf(alpha, "Alpha"));
+      assert.deepEqual(checked, [cliOf(nightly, "Nightly").command, cliOf(alpha, "Alpha").command]);
+    },
+  );
+
+  it.runIf(isMac)("refuses when no installed app matches the server", async () => {
+    const dir = tempDir("t3code-vscode-apps-");
+    const stale = makeAppBundle(dir, "Stale.app", "Stale");
+    const error = await findServerCli({
+      ...base,
+      desktopAppPath: stale,
+      serverCommand: [],
+      platform: "darwin",
+      readVersion: async () => "0.0.40",
+    }).catch((cause: unknown) => cause);
+    assert.instanceOf(error, Error);
+    assert.include((error as Error).message, `${stale} is version 0.0.40`);
+    assert.include((error as Error).message, "Paste a pairing link");
+  });
+
+  it.runIf(isMac)("reads the binary name from Info.plist and needs app.asar", async () => {
     const dir = tempDir("t3code-vscode-apps-");
     const app = makeAppBundle(dir, "Custom T3.app", "T3 Binary");
-    assert.deepEqual(
-      await findServerCli({
-        serverCommand: [],
-        desktopAppPath: app,
-        homeDirectory: dir,
-        platform: "darwin",
-      }),
-      {
-        command: NodePath.join(app, "Contents", "MacOS", "T3 Binary"),
-        args: [NodePath.join(app, "Contents", "Resources", "app.asar", "apps/server/dist/bin.mjs")],
-      },
-    );
-  });
+    assert.deepEqual(await resolveDesktopAppCli(app), cliOf(app, "T3 Binary"));
 
-  it("rejects bundles missing their binary or app.asar", async () => {
-    const dir = tempDir("t3code-vscode-apps-");
     const noBinary = makeAppBundle(dir, "NoBinary.app", "Missing");
     NodeFS.rmSync(NodePath.join(noBinary, "Contents", "MacOS", "Missing"));
     const noAsar = makeAppBundle(dir, "NoAsar.app", "T3");
@@ -146,17 +285,6 @@ describe("findServerCli", () => {
     assert.isNull(await resolveDesktopAppCli(noBinary));
     assert.isNull(await resolveDesktopAppCli(noAsar));
     assert.isNull(await resolveDesktopAppCli(NodePath.join(dir, "Absent.app")));
-  });
-
-  it("asks for serverCommand where it cannot find the app", async () => {
-    const error = await findServerCli({
-      serverCommand: [],
-      desktopAppPath: undefined,
-      homeDirectory: "/nowhere",
-      platform: "linux",
-    }).catch((cause: unknown) => cause);
-    assert.instanceOf(error, Error);
-    assert.include((error as Error).message, "t3code.serverCommand");
   });
 });
 
